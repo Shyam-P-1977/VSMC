@@ -1,0 +1,99 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: 248 250 252; /* slate-50 */
+  --surface: 255 255 255;
+  --surface-2: 241 245 249; /* slate-100 */
+  --line: 226 232 240; /* slate-200 */
+  --ink: 15 23 42; /* slate-900 */
+  --muted: 100 116 139; /* slate-500 */
+  
+  /* Primary: Electric Teal */
+  --brand-50: 236 254 255;
+  --brand-100: 207 250 254;
+  --brand-200: 165 243 252;
+  --brand-400: 34 211 238;
+  --brand-500: 6 182 212;
+  --brand-600: 8 145 178;
+  --brand-700: 14 116 144;
+  --brand-900: 22 78 99;
+
+  /* Accent: Amber */
+  --accent-400: 251 191 36;
+  --accent-500: 245 158 11;
+  --accent-600: 217 119 6;
+
+  /* Semantic */
+  --success: 16 185 129; /* emerald-500 */
+  --warning: 245 158 11; /* amber-500 */
+  --danger: 239 68 68;   /* red-500 */
+  --info: 59 130 246;    /* blue-500 */
+}
+.dark {
+  --bg: 15 23 42; /* slate-900 */
+  --surface: 30 41 59; /* slate-800 */
+  --surface-2: 51 65 85; /* slate-700 */
+  --line: 71 85 105; /* slate-600 */
+  --ink: 248 250 252; /* slate-50 */
+  --muted: 148 163 184; /* slate-400 */
+  
+  --brand-50: 8 47 60;
+  --brand-100: 12 74 92;
+  --brand-200: 14 94 116;
+  --brand-400: 34 211 238;
+  --brand-500: 6 182 212;
+  --brand-600: 34 190 220;
+  --brand-700: 103 232 249;
+  --brand-900: 207 250 254;
+
+  --accent-400: 251 191 36;
+  --accent-500: 245 158 11;
+  --accent-600: 217 119 6;
+
+  --success: 16 185 129;
+  --warning: 245 158 11;
+  --danger: 239 68 68;
+  --info: 59 130 246;
+}
+
+html { scroll-behavior: smooth; }
+body { @apply bg-bg text-ink font-sans antialiased; transition: background-color .25s ease; }
+h1, h2, h3, h4 { @apply font-display; }
+::selection { background: rgb(var(--brand-400) / .35); }
+
+@layer components {
+  .card { @apply bg-surface border border-line rounded-2xl shadow-sm transition-shadow hover:shadow-card; }
+  .card-hover { @apply hover:-translate-y-1 hover:shadow-lift hover:border-brand-500/30; }
+  .btn { @apply inline-flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold transition-all duration-200 active:scale-[.97] disabled:opacity-50 disabled:pointer-events-none focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2 focus-visible:ring-offset-bg; }
+  .btn-primary { @apply btn text-white bg-gradient-to-r from-brand-600 to-brand-500 shadow-md hover:shadow-lift hover:brightness-110; }
+  .btn-secondary { @apply btn bg-surface-2 text-ink border border-line hover:border-brand-500/50 hover:bg-surface; }
+  .btn-ghost { @apply btn text-muted hover:text-ink hover:bg-surface-2; }
+  .btn-danger { @apply btn bg-red-600 text-white hover:bg-red-500 shadow-md hover:shadow-red-500/25; }
+  .btn-success { @apply btn bg-emerald-600 text-white hover:bg-emerald-500 shadow-md hover:shadow-emerald-500/25; }
+  .btn-sm { @apply px-3 py-1.5 text-xs rounded-lg; }
+  
+  /* Floating Label Input Base */
+  .floating-container { @apply relative w-full; }
+  .input { @apply block w-full rounded-xl border border-line bg-surface px-4 pb-2.5 pt-6 text-sm text-ink transition-all focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 disabled:opacity-60; }
+  .input-error { @apply border-red-500 focus:border-red-500 focus:ring-red-500/20; }
+  .floating-label { @apply absolute left-4 top-4 z-10 origin-[0] -translate-y-3 scale-75 transform text-muted transition-all duration-200 peer-placeholder-shown:translate-y-0 peer-placeholder-shown:scale-100 peer-focus:-translate-y-3 peer-focus:scale-75 peer-focus:text-brand-500 font-medium cursor-text; }
+  .floating-label-error { @apply text-red-500 peer-focus:text-red-500; }
+  
+  .badge { @apply inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold shadow-sm; }
+  .th { @apply px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-muted bg-surface-2/50 backdrop-blur-sm sticky top-0 z-10; }
+  .td { @apply px-4 py-3 text-sm text-ink border-t border-line/50; }
+}
+
+.skeleton { position: relative; overflow: hidden; @apply bg-surface-2 rounded-lg; }
+.skeleton::after { content: ''; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgb(var(--line) / .7), transparent); animation: shimmer 1.4s infinite; }
+
+.hero-grid { background-image: linear-gradient(rgb(255 255 255 / .05) 1px, transparent 1px), linear-gradient(90deg, rgb(255 255 255 / .05) 1px, transparent 1px); background-size: 44px 44px; }
+
+@media print {
+  aside, header, .no-print { display: none !important; }
+  main { padding: 0 !important; }
+  body { background: #fff; }
+}

@@ -1,0 +1,10 @@
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+backend/vscms.db
+backend/vscms.db-shm
+backend/vscms.db-wal
+.DS_Store
