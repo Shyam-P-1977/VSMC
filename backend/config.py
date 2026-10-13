@@ -1,31 +1,24 @@
 import os
 from datetime import timedelta
 
-from dotenv import load_dotenv
-
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
-
+basedir = os.path.abspath(os.path.dirname(__file__))
 
 class Config:
-    SECRET_KEY = os.getenv("SECRET_KEY", "dev-insecure-secret-key-change-me-please")
-    JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-insecure-jwt-key-change-me-please-0000")
-    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=float(os.getenv("JWT_EXPIRY_HOURS", "8")))
-    SQLALCHEMY_DATABASE_URI = os.getenv(
-        "DATABASE_URL", "sqlite:///" + os.path.join(BASE_DIR, "vscms.db").replace("\\", "/")
-    )
+    SECRET_KEY = os.environ.get('SECRET_KEY', 'vscms-super-secret-key-2026-production-ready')
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'vscms-super-secret-jwt-token-key-2026-production-ready!')
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=8)
+    
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or f"sqlite:///{os.path.join(basedir, 'vscms.db')}"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    SQLALCHEMY_ENGINE_OPTIONS = {"connect_args": {"timeout": 30}}
-    FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
-    PAYMENT_DELAY_SECONDS = float(os.getenv("PAYMENT_DELAY_SECONDS", "1.5"))
-    JSON_SORT_KEYS = False
-
+    
+    UPLOAD_FOLDER = os.path.join(basedir, 'uploads')
+    MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16 MB max upload
+    ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
+    ALLOWED_MIME_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
+    
+    GST_RATE = 18.0
 
 class TestConfig(Config):
     TESTING = True
-    PAYMENT_DELAY_SECONDS = 0
-    SQLALCHEMY_DATABASE_URI = "sqlite://"
-    SQLALCHEMY_ENGINE_OPTIONS = {
-        "connect_args": {"check_same_thread": False},
-        "poolclass": __import__("sqlalchemy.pool", fromlist=["StaticPool"]).StaticPool,
-    }
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
+    WTF_CSRF_ENABLED = False

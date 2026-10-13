@@ -1,417 +1,743 @@
-"""SQLAlchemy models for VSCMS."""
-from datetime import datetime, timezone
-
-from sqlalchemy import UniqueConstraint
-from werkzeug.security import check_password_hash, generate_password_hash
-
+from datetime import datetime
 from extensions import db
 
-# ---- constants -------------------------------------------------------------
-ROLES = ("customer", "admin", "mechanic")
-REQUEST_STATUSES = ("Pending", "Assigned", "In Progress", "Awaiting Parts", "Completed", "Cancelled")
-ACTIVE_STATUSES = ("Pending", "Assigned", "In Progress", "Awaiting Parts")
-MECHANIC_ACTIVE_STATUSES = ("Assigned", "In Progress", "Awaiting Parts")
-PAYMENT_METHODS = ("UPI", "Card", "NetBanking", "Cash")
-INVOICE_STATUSES = ("Unpaid", "Paid")
-FUEL_TYPES = ("Petrol", "Diesel", "CNG", "Electric", "Hybrid")
+class Service_Center(db.Model):
+    __tablename__ = 'service_centers'
 
-
-def utcnow():
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def iso(dt):
-    return dt.isoformat() + "Z" if dt else None
-
-
-def money(v):
-    return round(float(v or 0), 2)
-
-
-# ---- users -----------------------------------------------------------------
-class User(db.Model):
-    __tablename__ = "users"
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
-    email = db.Column(db.String(160), unique=True, nullable=False, index=True)
-    contact = db.Column(db.String(15), unique=True, nullable=False)
-    password_hash = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.String(20), nullable=False, index=True)
-    address = db.Column(db.String(300))
-    is_active = db.Column(db.Boolean, nullable=False, default=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    center_code = db.Column(db.String(30), unique=True, nullable=True, index=True)
+    owner_user_id = db.Column(db.Integer, db.ForeignKey('users.User_ID', use_alter=True, name='fk_service_center_owner'), nullable=True)
+    email = db.Column(db.String(120), nullable=False)
+    phone = db.Column(db.String(20), nullable=False)
+    address = db.Column(db.String(255), nullable=False)
+    city = db.Column(db.String(50), nullable=False)
+    area = db.Column(db.String(50), nullable=False)
+    state = db.Column(db.String(50), default='Maharashtra', nullable=False)
+    pincode = db.Column(db.String(10), nullable=True)
+    latitude = db.Column(db.Float, nullable=False)
+    longitude = db.Column(db.Float, nullable=False)
+    working_hours = db.Column(db.String(50), default='09:00-18:00', nullable=False)
+    working_days = db.Column(db.String(50), default='Mon-Sat', nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    photo_url = db.Column(db.String(255), nullable=True)
+    approval_status = db.Column(db.String(20), default='Pending', nullable=False)  # 'Pending', 'Approved', 'Rejected', 'Suspended'
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    avg_rating = db.Column(db.Float, default=4.8, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-    mechanic = db.relationship("Mechanic", back_populates="user", uselist=False)
+    # Relationships
+    owner = db.relationship('User', foreign_keys=[owner_user_id], back_populates='owned_centers')
+    center_services = db.relationship('Center_Service', back_populates='center', cascade='all, delete-orphan')
+    mechanics = db.relationship('Mechanic', back_populates='center')
+    slots = db.relationship('Time_Slot', back_populates='center', cascade='all, delete-orphan')
+    parts = db.relationship('Spare_Part', back_populates='center', cascade='all, delete-orphan')
+    requests = db.relationship('Service_Request', back_populates='center')
+    feedbacks = db.relationship('Customer_Feedback', back_populates='center', cascade='all, delete-orphan')
+    invoices = db.relationship('Invoice', back_populates='center')
 
-    def set_password(self, pw):
-        self.password_hash = generate_password_hash(pw)
+    def to_dict(self, include_services=False):
+        data = {
+            "id": self.id,
+            "Center_ID": self.id,
+            "name": self.name,
+            "center_code": self.center_code,
+            "owner_user_id": self.owner_user_id,
+            "email": self.email,
+            "phone": self.phone,
+            "address": self.address,
+            "city": self.city,
+            "area": self.area,
+            "state": self.state,
+            "pincode": self.pincode,
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "working_hours": self.working_hours,
+            "working_days": self.working_days,
+            "description": self.description,
+            "photo_url": self.photo_url or f"https://images.unsplash.com/photo-1486006920555-c77dce18193b?auto=format&fit=crop&w=600&q=80",
+            "approval_status": self.approval_status,
+            "is_active": self.is_active,
+            "avg_rating": round(self.avg_rating, 1) if self.avg_rating else 4.8,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "services_count": len(self.center_services) if self.center_services else 0,
+            "mechanics_count": len(self.mechanics) if self.mechanics else 0
+        }
+        if include_services:
+            data["offered_services"] = [cs.to_dict() for cs in self.center_services if cs.is_active]
+        return data
 
-    def check_password(self, pw):
-        return check_password_hash(self.password_hash, pw)
+
+class User(db.Model):
+    __tablename__ = 'users'
+
+    User_ID = db.Column(db.Integer, primary_key=True)
+    Name = db.Column(db.String(120), nullable=False)
+    Email = db.Column(db.String(120), unique=True, nullable=False)
+    Contact = db.Column(db.String(20), unique=True, nullable=False)
+    Password_Hash = db.Column(db.String(255), nullable=False)
+    Role = db.Column(db.String(30), nullable=False)  # 'customer', 'center' (or legacy 'admin'), 'mechanic', 'platform_admin'
+    Address = db.Column(db.String(255), nullable=True)
+    Is_Active = db.Column(db.Boolean, default=True, nullable=False)
+    Created_At = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Multi-center & Location fields
+    center_id = db.Column(db.Integer, db.ForeignKey('service_centers.id', use_alter=True, name='fk_user_center'), nullable=True)
+    city = db.Column(db.String(50), nullable=True)
+    area = db.Column(db.String(50), nullable=True)
+    state = db.Column(db.String(50), default='Maharashtra', nullable=True)
+    latitude = db.Column(db.Float, nullable=True)
+    longitude = db.Column(db.Float, nullable=True)
+
+    # Relationships
+    owned_centers = db.relationship('Service_Center', foreign_keys=[Service_Center.owner_user_id], back_populates='owner')
+    center = db.relationship('Service_Center', foreign_keys=[center_id])
+    mechanic_profile = db.relationship('Mechanic', back_populates='user', uselist=False, cascade='all, delete-orphan')
+    vehicles = db.relationship('Vehicle', back_populates='customer', cascade='all, delete-orphan')
+    notifications = db.relationship('Notification', back_populates='user', cascade='all, delete-orphan', order_by='Notification.Created_At.desc()')
 
     def to_dict(self):
-        d = {
-            "id": self.id, "name": self.name, "email": self.email, "contact": self.contact,
-            "role": self.role, "address": self.address, "is_active": self.is_active,
-            "created_at": iso(self.created_at),
+        data = {
+            "User_ID": self.User_ID,
+            "Name": self.Name,
+            "Email": self.Email,
+            "Contact": self.Contact,
+            "Role": self.Role,
+            "Address": self.Address,
+            "Is_Active": self.Is_Active,
+            "Created_At": self.Created_At.isoformat() if self.Created_At else None,
+            "center_id": self.center_id,
+            "city": self.city,
+            "area": self.area,
+            "state": self.state,
+            "latitude": self.latitude,
+            "longitude": self.longitude
         }
-        if self.mechanic:
-            d["mechanic_id"] = self.mechanic.id
-            d["specialization"] = self.mechanic.specialization
-            d["is_available"] = self.mechanic.is_available
-        return d
+        act_center = self.center
+        if not act_center and self.owned_centers:
+            act_center = self.owned_centers[0]
+        if act_center:
+            data["Center_ID"] = act_center.id
+            data["center_id"] = act_center.id
+            data["Center_Name"] = act_center.name
+            data["Center_City"] = act_center.city
+            data["Center_Code"] = act_center.center_code
+            data["center_code"] = act_center.center_code
+        if self.Role == 'mechanic' and self.mechanic_profile:
+            data["Mechanic_ID"] = self.mechanic_profile.Mechanic_ID
+            data["Specialization"] = self.mechanic_profile.Specialization
+            data["Is_Available"] = self.mechanic_profile.Is_Available
+            data["experience_years"] = self.mechanic_profile.experience_years
+            data["rating"] = self.mechanic_profile.rating
+        return data
 
 
 class Mechanic(db.Model):
-    __tablename__ = "mechanics"
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), unique=True, nullable=False)
-    specialization = db.Column(db.String(120))
-    is_available = db.Column(db.Boolean, nullable=False, default=True, index=True)
+    __tablename__ = 'mechanics'
 
-    user = db.relationship("User", back_populates="mechanic")
+    Mechanic_ID = db.Column(db.Integer, primary_key=True)
+    User_ID = db.Column(db.Integer, db.ForeignKey('users.User_ID', ondelete='CASCADE'), unique=True, nullable=False)
+    center_id = db.Column(db.Integer, db.ForeignKey('service_centers.id'), nullable=True)
+    Specialization = db.Column(db.String(120), nullable=True)
+    Is_Available = db.Column(db.Boolean, default=True, nullable=False)
+    experience_years = db.Column(db.Integer, default=4, nullable=False)
+    rating = db.Column(db.Float, default=4.8, nullable=False)
+    photo_url = db.Column(db.String(255), nullable=True)
+
+    user = db.relationship('User', back_populates='mechanic_profile')
+    center = db.relationship('Service_Center', back_populates='mechanics')
+    assigned_requests = db.relationship('Service_Request', back_populates='mechanic')
 
     def to_dict(self):
+        user_dict = self.user.to_dict() if self.user else {}
+        name = user_dict.get("Name")
+        phone = user_dict.get("Contact")
+        email = user_dict.get("Email")
         return {
-            "id": self.id, "user_id": self.user_id, "name": self.user.name, "email": self.user.email,
-            "contact": self.user.contact, "specialization": self.specialization,
-            "is_available": self.is_available, "is_active": self.user.is_active,
-            "created_at": iso(self.user.created_at),
+            "Mechanic_ID": self.Mechanic_ID,
+            "id": self.Mechanic_ID,
+            "User_ID": self.User_ID,
+            "center_id": self.center_id,
+            "Center_Name": self.center.name if self.center else None,
+            "Specialization": self.Specialization,
+            "specialization": self.Specialization,
+            "Is_Available": self.Is_Available,
+            "is_available": self.Is_Available,
+            "experience_years": self.experience_years,
+            "rating": round(self.rating, 1) if self.rating else 4.8,
+            "photo_url": self.photo_url or f"https://api.dicebear.com/7.x/avataaars/svg?seed={self.User_ID}",
+            "Name": name,
+            "name": name,
+            "Email": email,
+            "email": email,
+            "Contact": phone,
+            "phone": phone,
+            "Is_Active": user_dict.get("Is_Active", True)
         }
 
 
-# ---- vehicles / catalog / slots -------------------------------------------
 class Vehicle(db.Model):
-    __tablename__ = "vehicles"
-    id = db.Column(db.Integer, primary_key=True)
-    customer_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
-    registration_number = db.Column(db.String(20), unique=True, nullable=False, index=True)
-    make = db.Column(db.String(60), nullable=False)
-    model = db.Column(db.String(60), nullable=False)
-    year = db.Column(db.Integer, nullable=False)
-    fuel_type = db.Column(db.String(20))
-    color = db.Column(db.String(30))
-    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    __tablename__ = 'vehicles'
 
-    customer = db.relationship("User")
+    Vehicle_ID = db.Column(db.Integer, primary_key=True)
+    Customer_ID = db.Column(db.Integer, db.ForeignKey('users.User_ID', ondelete='CASCADE'), nullable=False)
+    Registration_Number = db.Column(db.String(20), unique=True, nullable=False)
+    Make = db.Column(db.String(50), nullable=False)
+    Model = db.Column(db.String(50), nullable=False)
+    Year = db.Column(db.Integer, nullable=False)
+    Fuel_Type = db.Column(db.String(30), nullable=False)
+    Color = db.Column(db.String(30), nullable=False)
+
+    customer = db.relationship('User', back_populates='vehicles')
+    requests = db.relationship('Service_Request', back_populates='vehicle', cascade='all, delete-orphan')
 
     def to_dict(self):
         return {
-            "id": self.id, "customer_id": self.customer_id,
-            "customer_name": self.customer.name if self.customer else None,
-            "registration_number": self.registration_number, "make": self.make, "model": self.model,
-            "year": self.year, "fuel_type": self.fuel_type, "color": self.color,
-            "created_at": iso(self.created_at),
+            "Vehicle_ID": self.Vehicle_ID,
+            "Customer_ID": self.Customer_ID,
+            "Registration_Number": self.Registration_Number,
+            "Make": self.Make,
+            "Model": self.Model,
+            "Year": self.Year,
+            "Fuel_Type": self.Fuel_Type,
+            "Color": self.Color
         }
 
 
 class Service(db.Model):
-    __tablename__ = "services"
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), unique=True, nullable=False)
-    description = db.Column(db.String(500), nullable=False, default="")
-    base_price = db.Column(db.Float, nullable=False)
-    estimated_hours = db.Column(db.Float, nullable=False, default=1)
-    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    __tablename__ = 'services'
+
+    Service_ID = db.Column(db.Integer, primary_key=True)
+    Name = db.Column(db.String(120), nullable=False)
+    Description = db.Column(db.Text, nullable=True)
+    Base_Price = db.Column(db.Float, nullable=False)
+    Estimated_Hours = db.Column(db.Float, nullable=False)
+    Is_Active = db.Column(db.Boolean, default=True, nullable=False)
 
     def to_dict(self):
         return {
-            "id": self.id, "name": self.name, "description": self.description,
-            "base_price": money(self.base_price), "estimated_hours": self.estimated_hours,
-            "is_active": self.is_active,
+            "Service_ID": self.Service_ID,
+            "Name": self.Name,
+            "Description": self.Description,
+            "Base_Price": self.Base_Price,
+            "Estimated_Hours": self.Estimated_Hours,
+            "Is_Active": self.Is_Active
         }
 
 
-class TimeSlot(db.Model):
-    __tablename__ = "time_slots"
-    __table_args__ = (UniqueConstraint("date", "start_time", name="uq_slot_date_start"),)
+class Center_Service(db.Model):
+    __tablename__ = 'center_services'
+
     id = db.Column(db.Integer, primary_key=True)
-    date = db.Column(db.Date, nullable=False, index=True)
-    start_time = db.Column(db.Time, nullable=False)
-    end_time = db.Column(db.Time, nullable=False)
-    capacity = db.Column(db.Integer, nullable=False, default=3)
-    booked_count = db.Column(db.Integer, nullable=False, default=0)
+    center_id = db.Column(db.Integer, db.ForeignKey('service_centers.id', ondelete='CASCADE'), nullable=False)
+    service_id = db.Column(db.Integer, db.ForeignKey('services.Service_ID', ondelete='CASCADE'), nullable=False)
+    price = db.Column(db.Float, nullable=False)
+    estimated_hours = db.Column(db.Float, nullable=False)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
 
-    def to_dict(self):
-        return {
-            "id": self.id, "date": self.date.isoformat(),
-            "start_time": self.start_time.strftime("%H:%M"), "end_time": self.end_time.strftime("%H:%M"),
-            "capacity": self.capacity, "booked_count": self.booked_count,
-            "available": max(self.capacity - self.booked_count, 0),
-            "is_available": self.booked_count < self.capacity,
-        }
-
-
-# ---- service requests ------------------------------------------------------
-class ServiceRequest(db.Model):
-    __tablename__ = "service_requests"
-    id = db.Column(db.Integer, primary_key=True)
-    customer_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
-    vehicle_id = db.Column(db.Integer, db.ForeignKey("vehicles.id"), nullable=False, index=True)
-    slot_id = db.Column(db.Integer, db.ForeignKey("time_slots.id"), nullable=False, index=True)
-    problem_description = db.Column(db.Text, nullable=False)
-    status = db.Column(db.String(20), nullable=False, default="Pending", index=True)
-    mechanic_id = db.Column(db.Integer, db.ForeignKey("mechanics.id"), nullable=True, index=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
-    updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
-    completed_at = db.Column(db.DateTime)
-
-    customer = db.relationship("User", foreign_keys=[customer_id])
-    vehicle = db.relationship("Vehicle")
-    slot = db.relationship("TimeSlot")
-    mechanic = db.relationship("Mechanic")
-    items = db.relationship("ServiceRequestItem", cascade="all, delete-orphan")
-    history = db.relationship("StatusHistory", cascade="all, delete-orphan",
-                              order_by="StatusHistory.timestamp, StatusHistory.id")
-    parts_used = db.relationship("JobPartUsed", cascade="all, delete-orphan")
-    labour = db.relationship("JobLabour", cascade="all, delete-orphan")
-    invoice = db.relationship("Invoice", uselist=False, cascade="all, delete-orphan",
-                              back_populates="request")
-    attachments = db.relationship("ServiceRequestAttachment", cascade="all, delete-orphan")
-
-    def to_dict(self, detail=False):
-        d = {
-            "id": self.id, "status": self.status, "problem_description": self.problem_description,
-            "customer": {"id": self.customer.id, "name": self.customer.name,
-                         "contact": self.customer.contact, "email": self.customer.email},
-            "vehicle": self.vehicle.to_dict(), "slot": self.slot.to_dict(),
-            "services": [i.service.to_dict() for i in self.items],
-            "estimated_total": money(sum(i.service.base_price for i in self.items)),
-            "mechanic": ({"id": self.mechanic.id, "name": self.mechanic.user.name,
-                          "contact": self.mechanic.user.contact} if self.mechanic else None),
-            "created_at": iso(self.created_at), "updated_at": iso(self.updated_at),
-            "completed_at": iso(self.completed_at),
-            "invoice": ({"id": self.invoice.id, "invoice_number": self.invoice.invoice_number,
-                         "total_amount": self.invoice.payable_total, "status": self.invoice.status}
-                        if self.invoice else None),
-            "attachments": [a.to_dict() for a in self.attachments],
-        }
-        if detail:
-            d["timeline"] = [h.to_dict() for h in self.history]
-            d["parts_used"] = [p.to_dict() for p in self.parts_used]
-            d["labour"] = [l.to_dict() for l in self.labour]
-        return d
-
-
-class ServiceRequestItem(db.Model):
-    __tablename__ = "service_request_items"
-    id = db.Column(db.Integer, primary_key=True)
-    request_id = db.Column(db.Integer, db.ForeignKey("service_requests.id"), nullable=False, index=True)
-    service_id = db.Column(db.Integer, db.ForeignKey("services.id"), nullable=False, index=True)
-    service = db.relationship("Service")
-
-
-class ServiceRequestAttachment(db.Model):
-    __tablename__ = "service_request_attachments"
-    id = db.Column(db.Integer, primary_key=True)
-    request_id = db.Column(db.Integer, db.ForeignKey("service_requests.id"), nullable=False, index=True)
-    file_name = db.Column(db.String(255), nullable=False)
-    file_path = db.Column(db.String(500), nullable=False)
-    file_type = db.Column(db.String(50), nullable=False)
-    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    center = db.relationship('Service_Center', back_populates='center_services')
+    service = db.relationship('Service')
 
     def to_dict(self):
         return {
             "id": self.id,
-            "file_name": self.file_name,
-            "file_path": self.file_path,
-            "file_type": self.file_type,
-            "created_at": iso(self.created_at)
+            "center_id": self.center_id,
+            "service_id": self.service_id,
+            "Service_ID": self.service_id,
+            "Name": self.service.Name if self.service else None,
+            "Description": self.service.Description if self.service else None,
+            "price": self.price,
+            "Base_Price": self.price,
+            "estimated_hours": self.estimated_hours,
+            "Estimated_Hours": self.estimated_hours,
+            "is_active": self.is_active,
+            "Is_Active": self.is_active
         }
 
 
-class StatusHistory(db.Model):
-    __tablename__ = "status_history"
-    id = db.Column(db.Integer, primary_key=True)
-    request_id = db.Column(db.Integer, db.ForeignKey("service_requests.id"), nullable=False, index=True)
-    status = db.Column(db.String(20), nullable=False)
-    changed_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
-    note = db.Column(db.String(300))
-    timestamp = db.Column(db.DateTime, nullable=False, default=utcnow)
-    user = db.relationship("User")
+class Time_Slot(db.Model):
+    __tablename__ = 'time_slots'
+
+    Slot_ID = db.Column(db.Integer, primary_key=True)
+    center_id = db.Column(db.Integer, db.ForeignKey('service_centers.id'), nullable=True)
+    Date = db.Column(db.String(10), nullable=False)  # YYYY-MM-DD
+    Start_Time = db.Column(db.String(10), nullable=False)
+    End_Time = db.Column(db.String(10), nullable=False)
+    Capacity = db.Column(db.Integer, default=3, nullable=False)
+    Booked_Count = db.Column(db.Integer, default=0, nullable=False)
+
+    center = db.relationship('Service_Center', back_populates='slots')
+    requests = db.relationship('Service_Request', back_populates='slot')
 
     def to_dict(self):
-        return {"id": self.id, "status": self.status, "note": self.note,
-                "changed_by": self.user.name if self.user else None,
-                "changed_by_role": self.user.role if self.user else None,
-                "timestamp": iso(self.timestamp)}
+        return {
+            "Slot_ID": self.Slot_ID,
+            "center_id": self.center_id,
+            "Date": self.Date,
+            "Start_Time": self.Start_Time,
+            "End_Time": self.End_Time,
+            "Capacity": self.Capacity,
+            "Booked_Count": self.Booked_Count,
+            "Available_Spots": max(0, self.Capacity - self.Booked_Count),
+            "Is_Available": self.Booked_Count < self.Capacity
+        }
 
 
-# ---- inventory / job details ------------------------------------------------
-class SparePart(db.Model):
-    __tablename__ = "spare_parts"
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(120), unique=True, nullable=False)
-    price = db.Column(db.Float, nullable=False)
-    quantity_in_stock = db.Column(db.Integer, nullable=False, default=0)
-    min_threshold = db.Column(db.Integer, nullable=False, default=5)
-    updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+class Service_Request(db.Model):
+    __tablename__ = 'service_requests'
+
+    Request_ID = db.Column(db.Integer, primary_key=True)
+    Customer_ID = db.Column(db.Integer, db.ForeignKey('users.User_ID'), nullable=False)
+    Vehicle_ID = db.Column(db.Integer, db.ForeignKey('vehicles.Vehicle_ID'), nullable=False)
+    Slot_ID = db.Column(db.Integer, db.ForeignKey('time_slots.Slot_ID'), nullable=False)
+    center_id = db.Column(db.Integer, db.ForeignKey('service_centers.id'), nullable=True)
+    Mechanic_ID = db.Column(db.Integer, db.ForeignKey('mechanics.Mechanic_ID'), nullable=True)
+    Status = db.Column(db.String(30), default='Pending Approval', nullable=False)  # Pending Approval, Accepted, Rejected, Assigned, In Progress, Awaiting Parts, Completed, Cancelled
+    rejection_reason = db.Column(db.Text, nullable=True)
+    accepted_at = db.Column(db.DateTime, nullable=True)
+    rejected_at = db.Column(db.DateTime, nullable=True)
+    assigned_at = db.Column(db.DateTime, nullable=True)
+    Problem_Description = db.Column(db.String(1000), nullable=True)
+    Problem_Categories = db.Column(db.JSON, nullable=True)
+    Problem_Symptoms = db.Column(db.JSON, nullable=True)
+    Problem_Started = db.Column(db.String(50), nullable=True)
+    Problem_Frequency = db.Column(db.String(50), nullable=True)
+    Urgency = db.Column(db.String(20), default='Routine', nullable=False)  # Routine, Soon, Urgent
+    Created_At = db.Column(db.DateTime, default=datetime.utcnow)
+    Updated_At = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    Completed_At = db.Column(db.DateTime, nullable=True)
+
+    center = db.relationship('Service_Center', back_populates='requests')
+    customer = db.relationship('User', foreign_keys=[Customer_ID])
+    vehicle = db.relationship('Vehicle', back_populates='requests')
+    slot = db.relationship('Time_Slot', back_populates='requests')
+    mechanic = db.relationship('Mechanic', back_populates='assigned_requests')
+    service_items = db.relationship('Request_Service_Item', back_populates='request', cascade='all, delete-orphan')
+    attachments = db.relationship('Request_Attachment', back_populates='request', cascade='all, delete-orphan')
+    status_history = db.relationship('Status_History', back_populates='request', cascade='all, delete-orphan', order_by='Status_History.Timestamp.asc()')
+    parts_used = db.relationship('Job_Part_Used', back_populates='request', cascade='all, delete-orphan')
+    labour_entries = db.relationship('Job_Labour', back_populates='request', cascade='all, delete-orphan')
+    invoice = db.relationship('Invoice', back_populates='request', uselist=False)
+    feedback = db.relationship('Customer_Feedback', back_populates='request', uselist=False)
+
+    @property
+    def services(self):
+        return self.service_items
+
+    def to_dict(self, full=True):
+        data = {
+            "Request_ID": self.Request_ID,
+            "Customer_ID": self.Customer_ID,
+            "Customer_Name": self.customer.Name if self.customer else None,
+            "Customer_Phone": self.customer.Contact if self.customer else None,
+            "Customer_Email": self.customer.Email if self.customer else None,
+            "Customer": {
+                "User_ID": self.Customer_ID,
+                "Name": self.customer.Name if self.customer else None,
+                "Contact": self.customer.Contact if self.customer else None,
+                "Email": self.customer.Email if self.customer else None
+            } if self.customer else None,
+            "Vehicle_ID": self.Vehicle_ID,
+            "Vehicle": self.vehicle.to_dict() if self.vehicle else None,
+            "Slot_ID": self.Slot_ID,
+            "Slot": self.slot.to_dict() if self.slot else None,
+            "center_id": self.center_id,
+            "Center": self.center.to_dict() if self.center else None,
+            "Mechanic_ID": self.Mechanic_ID,
+            "Mechanic": self.mechanic.to_dict() if self.mechanic else None,
+            "Status": self.Status,
+            "rejection_reason": self.rejection_reason,
+            "accepted_at": self.accepted_at.isoformat() if self.accepted_at else None,
+            "rejected_at": self.rejected_at.isoformat() if self.rejected_at else None,
+            "assigned_at": self.assigned_at.isoformat() if self.assigned_at else None,
+            "Problem_Description": self.Problem_Description,
+            "Problem_Categories": self.Problem_Categories or [],
+            "Problem_Symptoms": self.Problem_Symptoms or [],
+            "Problem_Started": self.Problem_Started,
+            "Problem_Frequency": self.Problem_Frequency,
+            "Urgency": self.Urgency,
+            "Created_At": self.Created_At.isoformat() if self.Created_At else None,
+            "Updated_At": self.Updated_At.isoformat() if self.Updated_At else None,
+            "Completed_At": self.Completed_At.isoformat() if self.Completed_At else None,
+            "Services": [item.to_dict() for item in self.service_items],
+            "Invoice_ID": self.invoice.Invoice_ID if self.invoice else None,
+            "Invoice_Number": self.invoice.Invoice_Number if self.invoice else None,
+            "Invoice_Status": self.invoice.Status if self.invoice else None,
+            "Invoice_Total": self.invoice.Total_Amount if self.invoice else None,
+            "Feedback": self.feedback.to_dict() if self.feedback else None
+        }
+        if full:
+            data["Attachments"] = [att.to_dict() for att in self.attachments]
+            data["Status_History"] = [hist.to_dict() for hist in self.status_history]
+            data["Parts_Used"] = [part.to_dict() for part in self.parts_used]
+            data["Labour_Entries"] = [labour.to_dict() for labour in self.labour_entries]
+        return data
+
+
+class Request_Service_Item(db.Model):
+    __tablename__ = 'request_service_items'
+
+    ID = db.Column(db.Integer, primary_key=True)
+    Request_ID = db.Column(db.Integer, db.ForeignKey('service_requests.Request_ID', ondelete='CASCADE'), nullable=False)
+    Service_ID = db.Column(db.Integer, db.ForeignKey('services.Service_ID'), nullable=False)
+    Unit_Price_At_Time = db.Column(db.Float, nullable=False)
+
+    request = db.relationship('Service_Request', back_populates='service_items')
+    service = db.relationship('Service')
 
     def to_dict(self):
-        return {"id": self.id, "name": self.name, "price": money(self.price),
-                "quantity_in_stock": self.quantity_in_stock, "min_threshold": self.min_threshold,
-                "is_low_stock": self.quantity_in_stock < self.min_threshold,
-                "updated_at": iso(self.updated_at)}
+        return {
+            "ID": self.ID,
+            "Request_ID": self.Request_ID,
+            "Service_ID": self.Service_ID,
+            "Name": self.service.Name if self.service else None,
+            "Description": self.service.Description if self.service else None,
+            "Estimated_Hours": self.service.Estimated_Hours if self.service else None,
+            "Unit_Price_At_Time": self.Unit_Price_At_Time,
+            "Base_Price": self.Unit_Price_At_Time
+        }
 
 
-class JobPartUsed(db.Model):
-    __tablename__ = "job_parts_used"
-    id = db.Column(db.Integer, primary_key=True)
-    request_id = db.Column(db.Integer, db.ForeignKey("service_requests.id"), nullable=False, index=True)
-    part_id = db.Column(db.Integer, db.ForeignKey("spare_parts.id"), nullable=False, index=True)
-    quantity = db.Column(db.Integer, nullable=False)
-    unit_price_at_time = db.Column(db.Float, nullable=False)
-    part = db.relationship("SparePart")
+class Request_Attachment(db.Model):
+    __tablename__ = 'request_attachments'
 
-    def to_dict(self):
-        return {"id": self.id, "part_id": self.part_id, "name": self.part.name,
-                "quantity": self.quantity, "unit_price": money(self.unit_price_at_time),
-                "line_total": money(self.quantity * self.unit_price_at_time)}
+    Attachment_ID = db.Column(db.Integer, primary_key=True)
+    Request_ID = db.Column(db.Integer, db.ForeignKey('service_requests.Request_ID', ondelete='CASCADE'), nullable=False)
+    Filename = db.Column(db.String(255), nullable=False)
+    Stored_Path = db.Column(db.String(255), nullable=False)
+    Mime_Type = db.Column(db.String(50), nullable=False)
+    Size_Bytes = db.Column(db.Integer, nullable=False)
+    Created_At = db.Column(db.DateTime, default=datetime.utcnow)
 
-
-class JobLabour(db.Model):
-    __tablename__ = "job_labour"
-    id = db.Column(db.Integer, primary_key=True)
-    request_id = db.Column(db.Integer, db.ForeignKey("service_requests.id"), nullable=False, index=True)
-    description = db.Column(db.String(300), nullable=False)
-    hours = db.Column(db.Float, nullable=False)
-    rate_per_hour = db.Column(db.Float, nullable=False)
-    repair_notes = db.Column(db.Text)
+    request = db.relationship('Service_Request', back_populates='attachments')
 
     def to_dict(self):
-        return {"id": self.id, "description": self.description, "hours": self.hours,
-                "rate_per_hour": money(self.rate_per_hour), "repair_notes": self.repair_notes,
-                "line_total": money(self.hours * self.rate_per_hour)}
+        return {
+            "Attachment_ID": self.Attachment_ID,
+            "Request_ID": self.Request_ID,
+            "Filename": self.Filename,
+            "Stored_Path": self.Stored_Path,
+            "Mime_Type": self.Mime_Type,
+            "Size_Bytes": self.Size_Bytes,
+            "Created_At": self.Created_At.isoformat() if self.Created_At else None
+        }
 
 
-# ---- billing ----------------------------------------------------------------
+class Status_History(db.Model):
+    __tablename__ = 'status_history'
+
+    History_ID = db.Column(db.Integer, primary_key=True)
+    Request_ID = db.Column(db.Integer, db.ForeignKey('service_requests.Request_ID', ondelete='CASCADE'), nullable=False)
+    Status = db.Column(db.String(30), nullable=False)
+    Changed_By = db.Column(db.Integer, db.ForeignKey('users.User_ID'), nullable=True)
+    Note = db.Column(db.Text, nullable=True)
+    Timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
+    request = db.relationship('Service_Request', back_populates='status_history')
+    user = db.relationship('User')
+
+    def to_dict(self):
+        return {
+            "History_ID": self.History_ID,
+            "Request_ID": self.Request_ID,
+            "Status": self.Status,
+            "Changed_By": self.Changed_By,
+            "Changed_By_Name": self.user.Name if self.user else "System",
+            "Note": self.Note,
+            "Timestamp": self.Timestamp.isoformat() if self.Timestamp else None
+        }
+
+
+class Spare_Part(db.Model):
+    __tablename__ = 'spare_parts'
+
+    Part_ID = db.Column(db.Integer, primary_key=True)
+    center_id = db.Column(db.Integer, db.ForeignKey('service_centers.id'), nullable=True)
+    Name = db.Column(db.String(120), nullable=False)
+    Price = db.Column(db.Float, nullable=False)
+    Quantity_In_Stock = db.Column(db.Integer, default=0, nullable=False)
+    Min_Threshold = db.Column(db.Integer, default=5, nullable=False)
+    Updated_At = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    center = db.relationship('Service_Center', back_populates='parts')
+
+    def to_dict(self):
+        return {
+            "Part_ID": self.Part_ID,
+            "center_id": self.center_id,
+            "Name": self.Name,
+            "Price": self.Price,
+            "Quantity_In_Stock": self.Quantity_In_Stock,
+            "Min_Threshold": self.Min_Threshold,
+            "Is_Low_Stock": self.Quantity_In_Stock <= self.Min_Threshold,
+            "Updated_At": self.Updated_At.isoformat() if self.Updated_At else None
+        }
+
+
+class Job_Part_Used(db.Model):
+    __tablename__ = 'job_parts_used'
+
+    ID = db.Column(db.Integer, primary_key=True)
+    Request_ID = db.Column(db.Integer, db.ForeignKey('service_requests.Request_ID', ondelete='CASCADE'), nullable=False)
+    Part_ID = db.Column(db.Integer, db.ForeignKey('spare_parts.Part_ID'), nullable=False)
+    Quantity = db.Column(db.Integer, nullable=False)
+    Unit_Price_At_Time = db.Column(db.Float, nullable=False)
+
+    request = db.relationship('Service_Request', back_populates='parts_used')
+    part = db.relationship('Spare_Part')
+
+    def to_dict(self):
+        return {
+            "ID": self.ID,
+            "Request_ID": self.Request_ID,
+            "Part_ID": self.Part_ID,
+            "Part_Name": self.part.Name if self.part else None,
+            "Quantity": self.Quantity,
+            "Unit_Price_At_Time": self.Unit_Price_At_Time,
+            "Total_Price": round(self.Quantity * self.Unit_Price_At_Time, 2)
+        }
+
+
+class Job_Labour(db.Model):
+    __tablename__ = 'job_labour'
+
+    ID = db.Column(db.Integer, primary_key=True)
+    Request_ID = db.Column(db.Integer, db.ForeignKey('service_requests.Request_ID', ondelete='CASCADE'), nullable=False)
+    Description = db.Column(db.String(255), nullable=False)
+    Hours = db.Column(db.Float, nullable=False)
+    Rate_Per_Hour = db.Column(db.Float, nullable=False)
+    Repair_Notes = db.Column(db.Text, nullable=True)
+
+    request = db.relationship('Service_Request', back_populates='labour_entries')
+
+    def to_dict(self):
+        return {
+            "ID": self.ID,
+            "Request_ID": self.Request_ID,
+            "Description": self.Description,
+            "Hours": self.Hours,
+            "Rate_Per_Hour": self.Rate_Per_Hour,
+            "Total_Charge": round(self.Hours * self.Rate_Per_Hour, 2),
+            "Repair_Notes": self.Repair_Notes
+        }
+
+
 class Invoice(db.Model):
-    __tablename__ = "invoices"
-    id = db.Column(db.Integer, primary_key=True)
-    request_id = db.Column(db.Integer, db.ForeignKey("service_requests.id"), unique=True, nullable=False)
-    invoice_number = db.Column(db.String(30), unique=True, nullable=False)
-    labour_charge = db.Column(db.Float, nullable=False, default=0)
-    parts_cost = db.Column(db.Float, nullable=False, default=0)
-    gst_rate = db.Column(db.Float, nullable=False, default=18)
-    gst_amount = db.Column(db.Float, nullable=False, default=0)
-    discount = db.Column(db.Float, nullable=False, default=0)
-    total_amount = db.Column(db.Float, nullable=False, default=0)
-    status = db.Column(db.String(10), nullable=False, default="Unpaid", index=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    __tablename__ = 'invoices'
 
-    request = db.relationship("ServiceRequest", back_populates="invoice")
-    payments = db.relationship("Payment", order_by="Payment.id")
-    adjustments = db.relationship("InvoiceAdjustment", cascade="all, delete-orphan",
-                                  order_by="InvoiceAdjustment.id")
+    Invoice_ID = db.Column(db.Integer, primary_key=True)
+    center_id = db.Column(db.Integer, db.ForeignKey('service_centers.id'), nullable=True)
+    Request_ID = db.Column(db.Integer, db.ForeignKey('service_requests.Request_ID'), unique=True, nullable=False)
+    Invoice_Number = db.Column(db.String(50), unique=True, nullable=False)
+    Labour_Charge = db.Column(db.Float, default=0.0, nullable=False)
+    Parts_Cost = db.Column(db.Float, default=0.0, nullable=False)
+    GST_Rate = db.Column(db.Float, default=18.0, nullable=False)
+    GST_Amount = db.Column(db.Float, default=0.0, nullable=False)
+    Discount = db.Column(db.Float, default=0.0, nullable=False)
+    Total_Amount = db.Column(db.Float, default=0.0, nullable=False)
+    Status = db.Column(db.String(20), default='Unpaid', nullable=False)  # Unpaid, Paid
+    Created_At = db.Column(db.DateTime, default=datetime.utcnow)
 
-    @property
-    def adjustments_total(self):
-        return money(sum(a.amount for a in self.adjustments))
+    center = db.relationship('Service_Center', back_populates='invoices')
+    request = db.relationship('Service_Request', back_populates='invoice')
+    payments = db.relationship('Payment', back_populates='invoice', cascade='all, delete-orphan', order_by='Payment.Created_At.desc()')
+    adjustments = db.relationship('Invoice_Adjustment', back_populates='invoice', cascade='all, delete-orphan', order_by='Invoice_Adjustment.Created_At.desc()')
+    line_items = db.relationship('Invoice_Line_Item', back_populates='invoice', cascade='all, delete-orphan')
 
-    @property
-    def payable_total(self):
-        return money(self.total_amount + self.adjustments_total)
+    def to_dict(self):
+        # Work repair notes summary from labour entries
+        work_notes = []
+        if self.request and self.request.labour_entries:
+            for l in self.request.labour_entries:
+                if l.Repair_Notes:
+                    work_notes.append(l.Repair_Notes)
 
-    @property
-    def paid_payment(self):
-        return next((p for p in self.payments if p.status == "Success"), None)
-
-    def to_dict(self, detail=True):
-        r = self.request
-        d = {
-            "id": self.id, "request_id": self.request_id, "invoice_number": self.invoice_number,
-            "labour_charge": money(self.labour_charge), "parts_cost": money(self.parts_cost),
-            "subtotal": money(self.labour_charge + self.parts_cost),
-            "gst_rate": self.gst_rate, "gst_amount": money(self.gst_amount),
-            "discount": money(self.discount), "total_amount": money(self.total_amount),
-            "adjustments_total": self.adjustments_total, "payable_total": self.payable_total,
-            "status": self.status, "created_at": iso(self.created_at),
-            "customer": {"id": r.customer.id, "name": r.customer.name, "contact": r.customer.contact,
-                         "email": r.customer.email},
-            "vehicle": {"registration_number": r.vehicle.registration_number,
-                        "make": r.vehicle.make, "model": r.vehicle.model},
+        return {
+            "Invoice_ID": self.Invoice_ID,
+            "Request_ID": self.Request_ID,
+            "center_id": self.center_id,
+            "Center": self.center.to_dict() if self.center else (self.request.center.to_dict() if self.request and self.request.center else None),
+            "Invoice_Number": self.Invoice_Number,
+            "Labour_Charge": self.Labour_Charge,
+            "Parts_Cost": self.Parts_Cost,
+            "Subtotal": round(self.Labour_Charge + self.Parts_Cost, 2),
+            "GST_Rate": self.GST_Rate,
+            "GST_Amount": self.GST_Amount,
+            "Discount": self.Discount,
+            "Total_Amount": self.Total_Amount,
+            "Status": self.Status,
+            "Created_At": self.Created_At.isoformat() if self.Created_At else None,
+            "Customer_Name": self.request.customer.Name if self.request and self.request.customer else None,
+            "Customer_Phone": self.request.customer.Contact if self.request and self.request.customer else None,
+            "Customer": self.request.customer.to_dict() if self.request and self.request.customer else None,
+            "Vehicle_Plate": self.request.vehicle.Registration_Number if self.request and self.request.vehicle else None,
+            "Vehicle_Details": f"{self.request.vehicle.Make} {self.request.vehicle.Model} ({self.request.vehicle.Year})" if self.request and self.request.vehicle else None,
+            "Vehicle": self.request.vehicle.to_dict() if self.request and self.request.vehicle else None,
+            "Mechanic": self.request.mechanic.to_dict() if self.request and self.request.mechanic else None,
+            "Repair_Notes_Summary": "; ".join(work_notes) if work_notes else "Routine scheduled service completed.",
+            "Appointment_Date": self.request.slot.Date if self.request and self.request.slot else None,
+            "Appointment_Time": f"{self.request.slot.Start_Time} - {self.request.slot.End_Time}" if self.request and self.request.slot else None,
+            "Completed_At": self.request.Completed_At.isoformat() if self.request and self.request.Completed_At else None,
+            "Line_Items": [li.to_dict() for li in self.line_items],
+            "Payments": [p.to_dict() for p in self.payments],
+            "Adjustments": [a.to_dict() for a in self.adjustments],
+            "Labour_Entries": [l.to_dict() for l in self.request.labour_entries] if self.request else [],
+            "Parts_Used": [p.to_dict() for p in self.request.parts_used] if self.request else []
         }
-        if detail:
-            d["labour"] = [l.to_dict() for l in r.labour]
-            d["parts"] = [p.to_dict() for p in r.parts_used]
-            d["services"] = [i.service.name for i in r.items]
-            d["adjustments"] = [a.to_dict() for a in self.adjustments]
-            d["payments"] = [p.to_dict() for p in self.payments]
-        return d
+
+
+class Invoice_Line_Item(db.Model):
+    __tablename__ = 'invoice_line_items'
+
+    id = db.Column(db.Integer, primary_key=True)
+    invoice_id = db.Column(db.Integer, db.ForeignKey('invoices.Invoice_ID', ondelete='CASCADE'), nullable=False)
+    item_type = db.Column(db.String(20), nullable=False)  # 'Service', 'Part', 'Labour'
+    description = db.Column(db.String(255), nullable=False)
+    quantity = db.Column(db.Float, default=1.0, nullable=False)
+    unit_price = db.Column(db.Float, nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+
+    invoice = db.relationship('Invoice', back_populates='line_items')
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "invoice_id": self.invoice_id,
+            "item_type": self.item_type,
+            "description": self.description,
+            "quantity": self.quantity,
+            "unit_price": self.unit_price,
+            "amount": self.amount
+        }
 
 
 class Payment(db.Model):
-    __tablename__ = "payments"
-    id = db.Column(db.Integer, primary_key=True)
-    invoice_id = db.Column(db.Integer, db.ForeignKey("invoices.id"), nullable=False, index=True)
-    amount = db.Column(db.Float, nullable=False)
-    method = db.Column(db.String(12))
-    transaction_id = db.Column(db.String(40), index=True)
-    # Initiated -> Processing -> Success | Failed | Cancelled
-    status = db.Column(db.String(12), nullable=False, default="Initiated", index=True)
-    failure_reason = db.Column(db.String(200))
-    last4 = db.Column(db.String(4))
-    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
-    invoice = db.relationship("Invoice", viewonly=True)
+    __tablename__ = 'payments'
+
+    Payment_ID = db.Column(db.Integer, primary_key=True)
+    Invoice_ID = db.Column(db.Integer, db.ForeignKey('invoices.Invoice_ID'), nullable=False)
+    Amount = db.Column(db.Float, nullable=False)
+    Method = db.Column(db.String(30), nullable=False)  # UPI, Card, NetBanking, Cash
+    Transaction_ID = db.Column(db.String(100), unique=True, nullable=False)
+    Status = db.Column(db.String(20), nullable=False)  # Success, Failed, Cancelled
+    Failure_Reason = db.Column(db.String(255), nullable=True)
+    Card_Last4 = db.Column(db.String(4), nullable=True)
+    Created_At = db.Column(db.DateTime, default=datetime.utcnow)
+
+    invoice = db.relationship('Invoice', back_populates='payments')
 
     def to_dict(self):
-        return {"id": self.id, "invoice_id": self.invoice_id, "amount": money(self.amount),
-                "method": self.method, "transaction_id": self.transaction_id, "status": self.status,
-                "failure_reason": self.failure_reason, "last4": self.last4,
-                "created_at": iso(self.created_at)}
+        return {
+            "Payment_ID": self.Payment_ID,
+            "payment_id": self.Payment_ID,
+            "id": self.Payment_ID,
+            "Invoice_ID": self.Invoice_ID,
+            "Amount": self.Amount,
+            "Method": self.Method,
+            "Transaction_ID": self.Transaction_ID,
+            "Status": self.Status,
+            "Failure_Reason": self.Failure_Reason,
+            "Card_Last4": self.Card_Last4,
+            "Created_At": self.Created_At.isoformat() if self.Created_At else None
+        }
 
 
-class InvoiceAdjustment(db.Model):
-    __tablename__ = "invoice_adjustments"
-    id = db.Column(db.Integer, primary_key=True)
-    invoice_id = db.Column(db.Integer, db.ForeignKey("invoices.id"), nullable=False, index=True)
-    reason = db.Column(db.String(300), nullable=False)
-    amount = db.Column(db.Float, nullable=False)  # signed: negative = credit/refund
-    created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
-    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
-    author = db.relationship("User")
+class Invoice_Adjustment(db.Model):
+    __tablename__ = 'invoice_adjustments'
+
+    ID = db.Column(db.Integer, primary_key=True)
+    Invoice_ID = db.Column(db.Integer, db.ForeignKey('invoices.Invoice_ID'), nullable=False)
+    Reason = db.Column(db.String(255), nullable=False)
+    Amount = db.Column(db.Float, nullable=False)
+    Created_By = db.Column(db.Integer, db.ForeignKey('users.User_ID'), nullable=False)
+    Created_At = db.Column(db.DateTime, default=datetime.utcnow)
+
+    invoice = db.relationship('Invoice', back_populates='adjustments')
+    author = db.relationship('User')
 
     def to_dict(self):
-        return {"id": self.id, "reason": self.reason, "amount": money(self.amount),
-                "created_by": self.author.name if self.author else None, "created_at": iso(self.created_at)}
+        return {
+            "ID": self.ID,
+            "Invoice_ID": self.Invoice_ID,
+            "Reason": self.Reason,
+            "Amount": self.Amount,
+            "Created_By": self.Created_By,
+            "Created_By_Name": self.author.Name if self.author else None,
+            "Created_At": self.Created_At.isoformat() if self.Created_At else None
+        }
+
+
+class Customer_Feedback(db.Model):
+    __tablename__ = 'customer_feedback'
+
+    id = db.Column(db.Integer, primary_key=True)
+    request_id = db.Column(db.Integer, db.ForeignKey('service_requests.Request_ID', ondelete='CASCADE'), unique=True, nullable=False)
+    customer_id = db.Column(db.Integer, db.ForeignKey('users.User_ID'), nullable=False)
+    center_id = db.Column(db.Integer, db.ForeignKey('service_centers.id'), nullable=False)
+    mechanic_id = db.Column(db.Integer, db.ForeignKey('mechanics.Mechanic_ID'), nullable=True)
+    rating = db.Column(db.Integer, nullable=False)  # 1 to 5
+    comment = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    request = db.relationship('Service_Request', back_populates='feedback')
+    customer = db.relationship('User')
+    center = db.relationship('Service_Center', back_populates='feedbacks')
+    mechanic = db.relationship('Mechanic')
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "request_id": self.request_id,
+            "customer_id": self.customer_id,
+            "customer_name": self.customer.Name if self.customer else "Anonymous",
+            "center_id": self.center_id,
+            "mechanic_id": self.mechanic_id,
+            "mechanic_name": self.mechanic.user.Name if self.mechanic and self.mechanic.user else None,
+            "rating": self.rating,
+            "comment": self.comment,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
 
 
 class Notification(db.Model):
-    __tablename__ = "notifications"
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
-    message = db.Column(db.String(500), nullable=False)
-    channel = db.Column(db.String(10), nullable=False, default="in_app")
-    is_read = db.Column(db.Boolean, nullable=False, default=False, index=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    __tablename__ = 'notifications'
+
+    Notification_ID = db.Column(db.Integer, primary_key=True)
+    User_ID = db.Column(db.Integer, db.ForeignKey('users.User_ID', ondelete='CASCADE'), nullable=False)
+    Message = db.Column(db.Text, nullable=False)
+    Channel = db.Column(db.String(20), default='in_app', nullable=False)  # in_app, sms, email
+    Is_Read = db.Column(db.Boolean, default=False, nullable=False)
+    Created_At = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', back_populates='notifications')
 
     def to_dict(self):
-        return {"id": self.id, "message": self.message, "channel": self.channel,
-                "is_read": self.is_read, "created_at": iso(self.created_at)}
+        return {
+            "Notification_ID": self.Notification_ID,
+            "User_ID": self.User_ID,
+            "Message": self.Message,
+            "Channel": self.Channel,
+            "Is_Read": self.Is_Read,
+            "Created_At": self.Created_At.isoformat() if self.Created_At else None
+        }
 
 
-class Setting(db.Model):
-    __tablename__ = "settings"
-    key = db.Column(db.String(60), primary_key=True)
-    value = db.Column(db.String(200), nullable=False)
+class Contact_Message(db.Model):
+    __tablename__ = 'contact_messages'
 
+    ID = db.Column(db.Integer, primary_key=True)
+    Name = db.Column(db.String(120), nullable=False)
+    Phone = db.Column(db.String(20), nullable=False)
+    Email = db.Column(db.String(120), nullable=False)
+    Message = db.Column(db.Text, nullable=False)
+    Created_At = db.Column(db.DateTime, default=datetime.utcnow)
 
-DEFAULT_SETTINGS = {
-    "gst_rate": "18",
-    "default_slot_capacity": "3",
-    "working_hours": "09:00-18:00",
-    "labour_rate": "500",
-}
-
-
-def get_setting(key):
-    s = db.session.get(Setting, key)
-    return s.value if s else DEFAULT_SETTINGS[key]
-
-
-def set_setting(key, value):
-    s = db.session.get(Setting, key)
-    if s:
-        s.value = str(value)
-    else:
-        db.session.add(Setting(key=key, value=str(value)))
+    def to_dict(self):
+        return {
+            "ID": self.ID,
+            "Name": self.Name,
+            "Phone": self.Phone,
+            "Email": self.Email,
+            "Message": self.Message,
+            "Created_At": self.Created_At.isoformat() if self.Created_At else None
+        }

@@ -1,45 +1,42 @@
-import axios from 'axios'
+import axios from 'axios';
 
-const TOKEN_KEY = 'vscms_token'
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5000/api';
 
-export const tokenStore = {
-  get: () => localStorage.getItem(TOKEN_KEY),
-  set: (t) => localStorage.setItem(TOKEN_KEY, t),
-  clear: () => localStorage.removeItem(TOKEN_KEY),
-}
-
-const client = axios.create({ baseURL: import.meta.env.VITE_API_URL || '/api', timeout: 30000 })
-
-client.interceptors.request.use((config) => {
-  const t = tokenStore.get()
-  if (t) config.headers.Authorization = `Bearer ${t}`
-  return config
-})
-
-client.interceptors.response.use(
-  (r) => r,
-  (error) => {
-    const url = error.config?.url || ''
-    // auto-logout when the session is no longer valid (but not for failed login attempts)
-    if (error.response?.status === 401 && !url.includes('/auth/login') && tokenStore.get()) {
-      tokenStore.clear()
-      window.dispatchEvent(new CustomEvent('vscms:logout'))
-    }
-    return Promise.reject(error)
+export const apiClient = axios.create({
+  baseURL: API_BASE_URL,
+  headers: {
+    'Content-Type': 'application/json',
   },
-)
+  timeout: 15000,
+});
 
-export const apiError = (e) => {
-  const d = e?.response?.data
-  if (d?.error) return d.error
-  if (e?.code === 'ECONNABORTED') return 'The request timed out. Please try again.'
-  if (!e?.response) return 'Cannot reach the server. Check your connection.'
-  return 'Something went wrong. Please try again.'
-}
+// Request interceptor: attach bearer token
+apiClient.interceptors.request.use(
+  (config) => {
+    const token = localStorage.getItem('vscms_token');
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
 
-export const apiFieldErrors = (e) => {
-  const d = e?.response?.data
-  return d?.field ? { [d.field]: d.error } : {}
-}
+// Response interceptor: handle errors & 401 auto logout
+apiClient.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response && error.response.status === 401) {
+      // Don't auto-logout if failed on login endpoint itself
+      const isLoginRequest = error.config.url.includes('/auth/login');
+      if (!isLoginRequest) {
+        localStorage.removeItem('vscms_token');
+        localStorage.removeItem('vscms_user');
+        window.dispatchEvent(new Event('vscms_auth_logout'));
+      }
+    }
+    return Promise.reject(error);
+  }
+);
 
-export default client
+export default apiClient;

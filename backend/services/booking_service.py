@@ -1,240 +1,365 @@
-"""Booking + job lifecycle (slots, booking, cancellation, assignment, status flow, completion)."""
-from datetime import date, datetime, time, timedelta
-
-from sqlalchemy import update
-from sqlalchemy.exc import IntegrityError
-
+import uuid
+from datetime import datetime, date, timedelta
 from extensions import db
-from models import (ACTIVE_STATUSES, Mechanic, Service, ServiceRequest, ServiceRequestItem,
-                    StatusHistory, TimeSlot, User, Vehicle, get_setting, utcnow)
-from services import billing_service
-from services.notification_service import notify, notify_admins
-from utils import ApiError, validation_error
+from models import (
+    Time_Slot, Service_Request, Request_Service_Item, Status_History,
+    Service, Center_Service, Mechanic, Service_Center
+)
+from services.notification_service import notify_user, notify_admins
 
-# Mechanic-driven transitions (Completed is handled by complete_job)
-MECHANIC_TRANSITIONS = {
-    "Assigned": ["In Progress"],
-    "In Progress": ["Awaiting Parts", "Completed"],
-    "Awaiting Parts": ["In Progress"],
-}
+HOURLY_SLOTS = [
+    ("09:00", "10:00"),
+    ("10:00", "11:00"),
+    ("11:00", "12:00"),
+    ("12:00", "13:00"),
+    ("14:00", "15:00"),
+    ("15:00", "16:00"),
+    ("16:00", "17:00"),
+    ("17:00", "18:00")
+]
 
+def ensure_slots_for_date(target_date_str: str, center_id: int = None):
+    """
+    Ensures 09:00 - 18:00 hourly slots exist for the given date (YYYY-MM-DD),
+    scoped to center_id if provided.
+    """
+    query = Time_Slot.query.filter_by(Date=target_date_str)
+    if center_id is not None:
+        query = query.filter_by(center_id=center_id)
+    
+    existing = query.all()
+    if existing:
+        return existing
 
-# ---- slots -------------------------------------------------------------------
-def ensure_slots(d):
-    """Generate hourly slots for date d on demand from the working-hours setting."""
-    if TimeSlot.query.filter_by(date=d).first():
-        return
-    start_s, end_s = get_setting("working_hours").split("-")
-    start_h, end_h = int(start_s.split(":")[0]), int(end_s.split(":")[0])
-    cap = int(get_setting("default_slot_capacity"))
+    new_slots = []
+    for start_time, end_time in HOURLY_SLOTS:
+        slot = Time_Slot(
+            center_id=center_id,
+            Date=target_date_str,
+            Start_Time=start_time,
+            End_Time=end_time,
+            Capacity=3,
+            Booked_Count=0
+        )
+        db.session.add(slot)
+        new_slots.append(slot)
+    db.session.commit()
+
+    query = Time_Slot.query.filter_by(Date=target_date_str)
+    if center_id is not None:
+        query = query.filter_by(center_id=center_id)
+    return query.order_by(Time_Slot.Start_Time.asc()).all()
+
+def find_alternate_slots(date_str: str, center_id: int = None, limit: int = 3):
+    """
+    Finds up to limit alternate available slots on the same date or upcoming days,
+    scoped to the specific center.
+    """
+    query = Time_Slot.query.filter(
+        Time_Slot.Date == date_str,
+        Time_Slot.Booked_Count < Time_Slot.Capacity
+    )
+    if center_id is not None:
+        query = query.filter(Time_Slot.center_id == center_id)
+
+    alternates = query.order_by(Time_Slot.Start_Time.asc()).limit(limit).all()
+    results = [s.to_dict() for s in alternates]
+
+    if len(results) >= limit:
+        return results[:limit]
+
+    # Check next 4 days
     try:
-        for h in range(start_h, end_h):
-            db.session.add(TimeSlot(date=d, start_time=time(h, 0), end_time=time(h + 1, 0), capacity=cap))
-        db.session.commit()
-    except IntegrityError:  # another request generated them concurrently
-        db.session.rollback()
+        base_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except Exception:
+        base_date = date.today()
 
+    for d_offset in range(1, 5):
+        if len(results) >= limit:
+            break
+        next_date_str = (base_date + timedelta(days=d_offset)).isoformat()
+        ensure_slots_for_date(next_date_str, center_id=center_id)
+        
+        n_query = Time_Slot.query.filter(
+            Time_Slot.Date == next_date_str,
+            Time_Slot.Booked_Count < Time_Slot.Capacity
+        )
+        if center_id is not None:
+            n_query = n_query.filter(Time_Slot.center_id == center_id)
+            
+        next_slots = n_query.order_by(Time_Slot.Start_Time.asc()).limit(limit - len(results)).all()
+        results.extend([s.to_dict() for s in next_slots])
 
-def _slot_is_past(slot):
-    now = datetime.now()
-    return datetime.combine(slot.date, slot.end_time) <= now
+    return results[:limit]
 
-
-def suggest_alternates(slot, limit=3):
-    found = []
-    for offset in range(0, 8):
-        d = slot.date + timedelta(days=offset)
-        ensure_slots(d)
-        q = TimeSlot.query.filter(TimeSlot.date == d, TimeSlot.booked_count < TimeSlot.capacity,
-                                  TimeSlot.id != slot.id).order_by(TimeSlot.start_time)
-        for s in q.all():
-            if not _slot_is_past(s):
-                found.append(s.to_dict())
-                if len(found) >= limit:
-                    return found
-    return found
-
-
-# ---- helpers -----------------------------------------------------------------
-def add_history(req, status, user_id, note=None):
-    db.session.add(StatusHistory(request_id=req.id, status=status, changed_by=user_id, note=note))
-
-
-def label(req):
-    return f"#{req.id} ({req.vehicle.registration_number})"
-
-
-def load_request_for(user, request_id):
-    """Fetch a request enforcing role-based visibility (BR-2)."""
-    req = db.session.get(ServiceRequest, request_id)
-    if not req:
-        raise ApiError("Service request not found", 404, "not_found")
-    if user.role == "customer" and req.customer_id != user.id:
-        raise ApiError("You do not have access to this request", 403, "forbidden")
-    if user.role == "mechanic":
-        if not user.mechanic or req.mechanic_id != user.mechanic.id:
-            raise ApiError("This job is not assigned to you", 403, "forbidden")
-    return req
-
-
-# ---- booking -------------------------------------------------------------------
-def book(customer, vehicle_id, service_ids, slot_id, problem, allow_past=False):
-    if not isinstance(service_ids, list) or not service_ids:
-        raise validation_error("Select at least one service", "service_ids")
-    try:
-        service_ids = sorted({int(s) for s in service_ids})
-    except (TypeError, ValueError):
-        raise validation_error("service_ids must be a list of ids", "service_ids")
-    if not isinstance(problem, str) or len(problem.strip()) < 5:
-        raise validation_error("Describe the problem (at least 5 characters)", "problem_description")
-    if len(problem) > 2000:
-        raise validation_error("Problem description is too long", "problem_description")
-
-    vehicle = db.session.get(Vehicle, vehicle_id) if isinstance(vehicle_id, int) else None
-    if not vehicle or vehicle.customer_id != customer.id:
-        raise ApiError("Vehicle not found", 404, "not_found")
-    services = Service.query.filter(Service.id.in_(service_ids), Service.is_active.is_(True)).all()
-    if len(services) != len(service_ids):
-        raise validation_error("One or more selected services are unavailable", "service_ids")
-    slot = db.session.get(TimeSlot, slot_id) if isinstance(slot_id, int) else None
+def check_slot_availability(slot_id: int, center_id: int = None):
+    """
+    Checks if a slot is available (Booked_Count < Capacity).
+    Returns dict with available boolean and up to 3 alternate slots if unavailable.
+    """
+    slot = db.session.get(Time_Slot, slot_id)
     if not slot:
-        raise ApiError("Time slot not found", 404, "not_found")
-    if not allow_past and _slot_is_past(slot):
-        raise ApiError("This time slot is in the past", 422, "slot_in_past")
+        return {
+            "available": False,
+            "error": "Time slot not found",
+            "alternates": []
+        }
 
-    # Atomic compare-and-increment: can never overbook even with concurrent requests.
-    res = db.session.execute(
-        update(TimeSlot).where(TimeSlot.id == slot.id, TimeSlot.booked_count < TimeSlot.capacity)
-        .values(booked_count=TimeSlot.booked_count + 1))
-    if res.rowcount == 0:
-        db.session.rollback()
-        alts = suggest_alternates(slot)
-        raise ApiError("This slot is fully booked. Please choose another slot.", 409,
-                       "slot_unavailable", alternates=alts)
+    if center_id is not None and slot.center_id != center_id:
+        return {
+            "available": False,
+            "error": "Time slot does not belong to the selected service center",
+            "alternates": []
+        }
 
-    req = ServiceRequest(customer_id=customer.id, vehicle_id=vehicle.id, slot_id=slot.id,
-                         problem_description=problem.strip(), status="Pending")
-    req.items = [ServiceRequestItem(service_id=s.id) for s in services]
+    is_available = slot.Booked_Count < slot.Capacity
+    alternates = []
+    if not is_available:
+        target_center = slot.center_id or center_id
+        alternates = find_alternate_slots(slot.Date, center_id=target_center, limit=3)
+
+    return {
+        "available": is_available,
+        "slot": slot.to_dict(),
+        "alternates": alternates
+    }
+
+def create_booking(customer_id: int, vehicle_id: int, slot_id: int, service_ids: list, problem_data: dict, center_id: int = None):
+    """
+    Atomically verifies slot capacity and creates the service request in 'Pending Approval' status.
+    If full, raises an error with alternate slots.
+    """
+    slot = db.session.query(Time_Slot).with_for_update().filter_by(Slot_ID=slot_id).first()
+    if not slot:
+        raise LookupError("Time slot does not exist")
+
+    # If center_id is provided, verify match
+    effective_center_id = center_id or slot.center_id or 1
+    if slot.center_id and center_id and slot.center_id != center_id:
+        raise ValueError("Selected slot belongs to a different service center")
+
+    if slot.Booked_Count >= slot.Capacity:
+        alternates = find_alternate_slots(slot.Date, center_id=effective_center_id, limit=3)
+        err = ValueError("Selected time slot is fully booked")
+        err.alternates = alternates
+        raise err
+
+    problem_categories = problem_data.get("problem_categories", [])
+    problem_desc = problem_data.get("problem_description", "").strip()
+
+    # If 'Other' or 'Other / My problem is not in the list' is selected, description is required (min 10 chars)
+    is_other_selected = any("other" in str(cat).lower() for cat in problem_categories)
+    if is_other_selected:
+        if len(problem_desc) < 10:
+            raise ValueError("When selecting 'Other', a problem description of at least 10 characters is required.")
+
+    urgency = problem_data.get("urgency", "Routine")
+    if urgency not in ["Routine", "Soon", "Urgent"]:
+        urgency = "Routine"
+
+    # Create service request in 'Pending Approval'
+    req = Service_Request(
+        center_id=effective_center_id,
+        Customer_ID=customer_id,
+        Vehicle_ID=vehicle_id,
+        Slot_ID=slot.Slot_ID,
+        Mechanic_ID=None,
+        Status="Pending Approval",
+        Problem_Description=problem_desc,
+        Problem_Categories=problem_categories,
+        Problem_Symptoms=problem_data.get("problem_symptoms", []),
+        Problem_Started=problem_data.get("problem_started"),
+        Problem_Frequency=problem_data.get("problem_frequency"),
+        Urgency=urgency,
+        Created_At=datetime.utcnow()
+    )
     db.session.add(req)
     db.session.flush()
-    add_history(req, "Pending", customer.id, "Booking created")
-    when = f"{slot.date.isoformat()} {slot.start_time.strftime('%H:%M')}"
-    notify(customer.id, f"Booking confirmed: request #{req.id} for {vehicle.registration_number} on {when}.",
-           sms=True, email=True)
-    notify_admins(f"New service request {label(req)} awaiting assignment.")
+
+    # Attach selected services with center-specific price if available
+    for sid in (service_ids or []):
+        service = db.session.get(Service, sid)
+        if service and service.Is_Active:
+            # Check for center-specific pricing
+            c_svc = Center_Service.query.filter_by(center_id=effective_center_id, service_id=service.Service_ID, is_active=True).first()
+            unit_price = c_svc.price if c_svc else service.Base_Price
+            
+            item = Request_Service_Item(
+                Request_ID=req.Request_ID,
+                Service_ID=service.Service_ID,
+                Unit_Price_At_Time=unit_price
+            )
+            db.session.add(item)
+
+    # Reserve the slot
+    slot.Booked_Count += 1
+
+    # Record initial status history
+    history = Status_History(
+        Request_ID=req.Request_ID,
+        Status="Pending Approval",
+        Changed_By=customer_id,
+        Note="Appointment request submitted by customer. Awaiting service center approval."
+    )
+    db.session.add(history)
+
+    # Notifications
+    center_name = req.center.name if req.center else "Service Center"
+    notify_user(customer_id, f"Appointment request #{req.Request_ID} sent to {center_name}. We will notify you once approved.")
+    
+    # Notify center owner / manager
+    if req.center and req.center.owner_user_id:
+        notify_user(req.center.owner_user_id, f"New appointment request #{req.Request_ID} received for {slot.Date} {slot.Start_Time} ({urgency}).")
+
+    if urgency == "Urgent":
+        notify_admins(f"URGENT BOOKING ALERT: Request #{req.Request_ID} at {center_name} marked Urgent!")
+
     db.session.commit()
     return req
 
+def cancel_booking(request_id: int, user_id: int, note: str = "Cancelled by user"):
+    """
+    Cancels a request if it is still Pending, Pending Approval, or Accepted, freeing the slot capacity.
+    """
+    req = db.session.get(Service_Request, request_id)
+    if not req:
+        raise LookupError("Service request not found")
 
-def _free_slot(req):
-    db.session.execute(update(TimeSlot).where(TimeSlot.id == req.slot_id, TimeSlot.booked_count > 0)
-                       .values(booked_count=TimeSlot.booked_count - 1))
+    allowed_statuses = ["Pending", "Pending Approval", "Accepted", "Assigned"]
+    if req.Status not in allowed_statuses:
+        raise ValueError(f"Cannot cancel a booking in '{req.Status}' status. Service is already underway or finalized.")
 
+    req.Status = "Cancelled"
+    
+    # Free slot
+    if req.slot and req.slot.Booked_Count > 0:
+        req.slot.Booked_Count -= 1
 
-def _free_mechanic(req):
-    if req.mechanic_id:
-        db.session.execute(update(Mechanic).where(Mechanic.id == req.mechanic_id).values(is_available=True))
+    # If mechanic was assigned, free them
+    if req.mechanic:
+        req.mechanic.Is_Available = True
 
+    history = Status_History(
+        Request_ID=req.Request_ID,
+        Status="Cancelled",
+        Changed_By=user_id,
+        Note=note
+    )
+    db.session.add(history)
+    notify_user(req.Customer_ID, f"Your service booking #{req.Request_ID} has been cancelled.")
 
-def cancel(req, user):
-    if req.status not in ("Pending", "Assigned"):
-        raise ApiError(f"A request that is '{req.status}' can no longer be cancelled", 409, "cannot_cancel")
-    mech = req.mechanic
-    _free_slot(req)
-    _free_mechanic(req)
-    req.status = "Cancelled"
-    add_history(req, "Cancelled", user.id, f"Cancelled by {user.role}")
-    if mech:
-        notify(mech.user_id, f"Job {label(req)} was cancelled.")
-    if user.role == "customer":
-        notify_admins(f"Customer cancelled request {label(req)}.")
-    else:
-        notify(req.customer_id, f"Your request {label(req)} was cancelled by the service center.", sms=True)
     db.session.commit()
     return req
 
+def accept_booking(request_id: int, user_id: int):
+    """
+    Service center accepts an appointment request. Slot remains held.
+    """
+    req = db.session.get(Service_Request, request_id)
+    if not req:
+        raise LookupError("Service request not found")
 
-# ---- assignment ----------------------------------------------------------------
-def assign(req, mechanic_id, admin):
-    if req.status not in ("Pending", "Assigned"):
-        raise ApiError(f"Cannot assign a mechanic to a '{req.status}' request", 409, "illegal_state")
-    mech = db.session.get(Mechanic, mechanic_id) if isinstance(mechanic_id, int) else None
-    if not mech or not mech.user.is_active:
-        raise ApiError("Mechanic not found", 404, "not_found")
-    if mech.id == req.mechanic_id:
-        raise ApiError("This mechanic is already assigned to the request", 409, "already_assigned")
-    res = db.session.execute(update(Mechanic).where(Mechanic.id == mech.id, Mechanic.is_available.is_(True))
-                             .values(is_available=False))
-    if res.rowcount == 0:
-        db.session.rollback()
-        raise ApiError("Mechanic is not available", 409, "mechanic_unavailable")
-    previous = req.mechanic
-    if previous:
-        _free_mechanic(req)
-        notify(previous.user_id, f"Job {label(req)} was reassigned to another mechanic.")
-    req.mechanic_id = mech.id
-    req.status = "Assigned"
-    add_history(req, "Assigned", admin.id, f"Assigned to {mech.user.name}")
-    notify(mech.user_id, f"New job assigned: {label(req)} - {req.problem_description[:80]}", sms=True)
-    notify(req.customer_id, f"Mechanic {mech.user.name} has been assigned to your request {label(req)}.",
-           sms=True, email=True)
+    if req.Status not in ["Pending Approval", "Pending"]:
+        raise ValueError(f"Only requests in 'Pending Approval' can be accepted (current: '{req.Status}')")
+
+    req.Status = "Accepted"
+    req.accepted_at = datetime.utcnow()
+
+    history = Status_History(
+        Request_ID=req.Request_ID,
+        Status="Accepted",
+        Changed_By=user_id,
+        Note="Appointment request accepted by service center."
+    )
+    db.session.add(history)
+
+    center_name = req.center.name if req.center else "Service Center"
+    date_info = f" for {req.slot.Date} at {req.slot.Start_Time}" if req.slot else ""
+    notify_user(req.Customer_ID, f"Great news! Your appointment #{req.Request_ID} has been accepted by {center_name}{date_info}.")
+
     db.session.commit()
     return req
 
+def reject_booking(request_id: int, user_id: int, reason: str):
+    """
+    Service center rejects an appointment request. Reason is required (min 10 chars).
+    Slot is automatically released.
+    """
+    req = db.session.get(Service_Request, request_id)
+    if not req:
+        raise LookupError("Service request not found")
 
-# ---- mechanic flow ----------------------------------------------------------------
-def change_status(req, new_status, user, note=None, no_parts_confirmed=False):
-    if new_status == "Completed":
-        return complete_job(req, user, no_parts_confirmed)
-    allowed = MECHANIC_TRANSITIONS.get(req.status, [])
-    if new_status not in allowed:
-        raise ApiError(f"Illegal status change: '{req.status}' -> '{new_status}'", 409, "illegal_transition",
-                       allowed=allowed)
-    req.status = new_status
-    add_history(req, new_status, user.id, note or f"Status changed to {new_status}")
-    notify(req.customer_id, f"Your request {label(req)} is now '{new_status}'.", sms=True)
+    if req.Status not in ["Pending Approval", "Pending", "Accepted"]:
+        raise ValueError(f"Cannot reject request in '{req.Status}' status")
+
+    reason_clean = (reason or "").strip()
+    if len(reason_clean) < 10:
+        raise ValueError("A rejection reason of at least 10 characters is required.")
+
+    req.Status = "Rejected"
+    req.rejected_at = datetime.utcnow()
+    req.rejection_reason = reason_clean
+
+    # Release slot
+    if req.slot and req.slot.Booked_Count > 0:
+        req.slot.Booked_Count -= 1
+
+    history = Status_History(
+        Request_ID=req.Request_ID,
+        Status="Rejected",
+        Changed_By=user_id,
+        Note=f"Appointment rejected: {reason_clean}"
+    )
+    db.session.add(history)
+
+    center_name = req.center.name if req.center else "Service Center"
+    notify_user(
+        req.Customer_ID,
+        f"Your appointment request #{req.Request_ID} at {center_name} was not accepted. Reason: {reason_clean}. You can choose another slot or center."
+    )
+
     db.session.commit()
     return req
 
+def assign_mechanic_to_request(request_id: int, mechanic_id: int, user_id: int):
+    """
+    Assigns an active mechanic belonging to the SAME service center to the request.
+    """
+    req = db.session.get(Service_Request, request_id)
+    if not req:
+        raise LookupError("Service request not found")
 
-def complete_job(req, user, no_parts_confirmed=False):
-    if req.status != "In Progress":
-        raise ApiError(f"Illegal status change: '{req.status}' -> 'Completed'", 409, "illegal_transition",
-                       allowed=MECHANIC_TRANSITIONS.get(req.status, []))
-    missing = []
-    if not req.labour:
-        missing.append("labour")
-    if not req.parts_used and not no_parts_confirmed:
-        missing.append("parts")
-    if missing:
-        msg = ("Missing details: record at least one labour entry" if "labour" in missing else
-               "Missing details: record parts used, or confirm that no parts were used")
-        raise ApiError(msg, 422, "missing_details", missing=missing)
+    if req.Status in ["Completed", "Cancelled", "Rejected"]:
+        raise ValueError(f"Cannot assign mechanic to a request in '{req.Status}' status")
 
-    req.status = "Completed"
-    req.completed_at = utcnow()
-    _free_mechanic(req)
-    add_history(req, "Completed", user.id, "Job completed by mechanic")
-    db.session.flush()
-    invoice = billing_service.generate_invoice(req)
-    notify(req.customer_id, f"Your request {label(req)} is completed.", sms=True)
-    notify(req.customer_id, f"Invoice generated: {invoice.invoice_number} for Rs. {invoice.payable_total:.2f}.",
-           sms=True, email=True)
-    notify_admins(f"Job {label(req)} completed. Invoice {invoice.invoice_number} generated.")
+    mech = db.session.get(Mechanic, mechanic_id)
+    if not mech or not (mech.user and mech.user.Is_Active):
+        raise LookupError("Mechanic not found or inactive")
+
+    # Center isolation check
+    if req.center_id and mech.center_id and req.center_id != mech.center_id:
+        raise PermissionError(f"Mechanic '{mech.user.Name}' belongs to a different service center (Center #{mech.center_id})")
+
+    req.Mechanic_ID = mech.Mechanic_ID
+    req.Status = "Assigned"
+    req.assigned_at = datetime.utcnow()
+
+    history = Status_History(
+        Request_ID=req.Request_ID,
+        Status="Assigned",
+        Changed_By=user_id,
+        Note=f"Assigned to mechanic {mech.user.Name}"
+    )
+    db.session.add(history)
+
+    # Notify Mechanic
+    notify_user(mech.User_ID, f"You have been assigned to Service Request #{req.Request_ID}.")
+
+    # Notify Customer with mechanic details
+    notify_user(
+        req.Customer_ID,
+        f"Mechanic {mech.user.Name} ({mech.Specialization or 'General Specialist'}) has been assigned to your service request #{req.Request_ID}."
+    )
+
     db.session.commit()
     return req
-
-
-def delete_request(req):
-    """Admin hard delete. Blocked once the invoice has been paid (BR-14)."""
-    if req.invoice and (req.invoice.status == "Paid" or req.invoice.paid_payment):
-        raise ApiError("Requests with a paid invoice cannot be deleted", 409, "paid_invoice_locked")
-    for p in req.parts_used:  # restore stock
-        p.part.quantity_in_stock += p.quantity
-    if req.status in ACTIVE_STATUSES:
-        _free_slot(req)
-        _free_mechanic(req)
-    for pay in (req.invoice.payments if req.invoice else []):
-        db.session.delete(pay)
-    db.session.delete(req)
-    db.session.commit()

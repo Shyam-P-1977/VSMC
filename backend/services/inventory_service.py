@@ -1,124 +1,78 @@
-"""Inventory + job parts/labour logic with transactional stock handling."""
-from sqlalchemy import update
-
 from extensions import db
-from models import JobLabour, JobPartUsed, SparePart, get_setting
-from services.notification_service import notify, notify_admins
-from utils import ApiError, clean_str, to_number, validation_error
+from models import Spare_Part, Job_Part_Used, Service_Request, Status_History
+from services.notification_service import notify_admins
 
+def add_part_to_job(request_id: int, part_id: int, quantity: int, changed_by_user_id: int = None):
+    """
+    Deducts stock and records a part used in a service request.
+    If stock is insufficient, changes request status to 'Awaiting Parts' and notifies Admin.
+    If stock drops to or below threshold, alerts Admin.
+    """
+    if quantity <= 0:
+        raise ValueError("Part quantity must be greater than 0")
 
-def _ensure_editable(req):
-    if req.status not in ("In Progress", "Awaiting Parts"):
-        raise ApiError("Parts and labour can only be recorded while the job is In Progress or Awaiting Parts",
-                       409, "illegal_state")
+    service_request = db.session.get(Service_Request, request_id)
+    if not service_request:
+        raise LookupError("Service request not found")
 
+    if service_request.Status in ['Completed', 'Cancelled']:
+        raise ValueError(f"Cannot modify parts for a {service_request.Status} request")
 
-def _low_stock_check(part):
-    if part.quantity_in_stock < part.min_threshold:
-        notify_admins(f"Low stock alert: {part.name} has {part.quantity_in_stock} left "
-                      f"(minimum {part.min_threshold}).")
-
-
-def _deduct(req, part, qty, user):
-    """Atomically deduct stock. On shortage: job -> Awaiting Parts, admin notified, error raised."""
-    from services.booking_service import add_history, label
-    res = db.session.execute(update(SparePart).where(SparePart.id == part.id, SparePart.quantity_in_stock >= qty)
-                             .values(quantity_in_stock=SparePart.quantity_in_stock - qty))
-    if res.rowcount == 0:
-        db.session.rollback()
-        part = db.session.get(SparePart, part.id)
-        req = db.session.get(type(req), req.id)
-        if req.status == "In Progress":
-            req.status = "Awaiting Parts"
-            add_history(req, "Awaiting Parts", user.id, f"Insufficient stock for {part.name}")
-            notify(req.customer_id, f"Your request {label(req)} is waiting for spare parts.", sms=True)
-        notify_admins(f"Insufficient stock: {part.name} needed {qty}, only {part.quantity_in_stock} available "
-                      f"for job {label(req)}.")
-        available, status = part.quantity_in_stock, req.status
-        db.session.commit()
-        raise ApiError("Insufficient stock", 409, "insufficient_stock", available=available,
-                       requested=qty, job_status=status)
-
-
-def add_part(req, part_id, quantity, user):
-    _ensure_editable(req)
-    part = db.session.get(SparePart, part_id) if isinstance(part_id, int) else None
+    part = db.session.get(Spare_Part, part_id)
     if not part:
-        raise ApiError("Spare part not found", 404, "not_found")
-    if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity < 1:
-        raise validation_error("Quantity must be a whole number of at least 1", "quantity")
-    _deduct(req, part, quantity, user)
-    jpu = JobPartUsed(request_id=req.id, part_id=part.id, quantity=quantity, unit_price_at_time=part.price)
-    db.session.add(jpu)
-    db.session.flush()
-    db.session.refresh(part)
-    _low_stock_check(part)
+        raise LookupError("Spare part not found")
+
+    # Check sufficient stock
+    if part.Quantity_In_Stock < quantity:
+        # Insufficient stock: Transition request to 'Awaiting Parts'
+        previous_status = service_request.Status
+        service_request.Status = 'Awaiting Parts'
+        history = Status_History(
+            Request_ID=service_request.Request_ID,
+            Status='Awaiting Parts',
+            Changed_By=changed_by_user_id,
+            Note=f"Insufficient stock for part '{part.Name}'. Requested {quantity}, in stock {part.Quantity_In_Stock}."
+        )
+        db.session.add(history)
+        notify_admins(f"Part Shortage: Job #{service_request.Request_ID} moved to 'Awaiting Parts' due to shortage of '{part.Name}'.")
+        db.session.commit()
+        raise ValueError(f"Insufficient stock for '{part.Name}' ({part.Quantity_In_Stock} available). Job marked as 'Awaiting Parts'.")
+
+    # Auto deduct
+    part.Quantity_In_Stock -= quantity
+    
+    # Record part used
+    job_part = Job_Part_Used(
+        Request_ID=service_request.Request_ID,
+        Part_ID=part.Part_ID,
+        Quantity=quantity,
+        Unit_Price_At_Time=part.Price
+    )
+    db.session.add(job_part)
+
+    # Check low stock threshold
+    if part.Quantity_In_Stock <= part.Min_Threshold:
+        notify_admins(f"Low Stock Alert: Part '{part.Name}' has only {part.Quantity_In_Stock} units remaining (Threshold: {part.Min_Threshold}).")
+
     db.session.commit()
-    return jpu
+    return job_part
 
+def remove_part_from_job(request_id: int, job_part_id: int):
+    """
+    Removes a used part from a job and restores the stock count.
+    """
+    job_part = db.session.get(Job_Part_Used, job_part_id)
+    if not job_part or job_part.Request_ID != request_id:
+        raise LookupError("Used part entry not found for this request")
 
-def update_part(req, jpu, quantity, user):
-    _ensure_editable(req)
-    if not isinstance(quantity, int) or isinstance(quantity, bool) or quantity < 1:
-        raise validation_error("Quantity must be a whole number of at least 1", "quantity")
-    delta = quantity - jpu.quantity
-    part = jpu.part
-    if delta > 0:
-        _deduct(req, part, delta, user)
-        jpu = db.session.get(JobPartUsed, jpu.id)
-    elif delta < 0:
-        part.quantity_in_stock += -delta
-    jpu.quantity = quantity
-    db.session.flush()
-    db.session.refresh(part)
-    if delta > 0:
-        _low_stock_check(part)
+    service_request = db.session.get(Service_Request, request_id)
+    if service_request.Status in ['Completed', 'Cancelled']:
+        raise ValueError(f"Cannot modify parts for a {service_request.Status} request")
+
+    part = db.session.get(Spare_Part, job_part.Part_ID)
+    if part:
+        part.Quantity_In_Stock += job_part.Quantity
+
+    db.session.delete(job_part)
     db.session.commit()
-    return jpu
-
-
-def remove_part(req, jpu):
-    _ensure_editable(req)
-    jpu.part.quantity_in_stock += jpu.quantity   # restore stock
-    db.session.delete(jpu)
-    db.session.commit()
-
-
-def add_labour(req, data):
-    _ensure_editable(req)
-    desc = clean_str(data, "description", "Description", max_len=300)
-    hours = to_number(data, "hours", "Hours", minimum=0.1, maximum=100)
-    rate = to_number(data, "rate_per_hour", "Rate per hour", minimum=0, maximum=100000, required=False,
-                     default=float(get_setting("labour_rate")))
-    notes = clean_str(data, "repair_notes", "Repair notes", required=False, max_len=2000)
-    entry = JobLabour(request_id=req.id, description=desc, hours=hours, rate_per_hour=rate, repair_notes=notes)
-    db.session.add(entry)
-    db.session.commit()
-    return entry
-
-
-def remove_labour(req, entry):
-    _ensure_editable(req)
-    db.session.delete(entry)
-    db.session.commit()
-
-
-# ---- admin inventory CRUD ------------------------------------------------------
-def save_part(part, data, partial=False):
-    if not partial or "name" in data:
-        name = clean_str(data, "name", "Name", max_len=120)
-        dup = SparePart.query.filter(SparePart.name.ilike(name))
-        if part.id:
-            dup = dup.filter(SparePart.id != part.id)
-        if dup.first():
-            raise ApiError("A spare part with this name already exists", 409, "duplicate")
-        part.name = name
-    if not partial or "price" in data:
-        part.price = to_number(data, "price", "Price", minimum=0, maximum=10000000)
-    if not partial or "quantity_in_stock" in data:
-        part.quantity_in_stock = to_number(data, "quantity_in_stock", "Stock quantity", minimum=0,
-                                           integer=True, maximum=1000000)
-    if "min_threshold" in data or not part.id:
-        part.min_threshold = to_number(data, "min_threshold", "Minimum threshold", minimum=0, integer=True,
-                                       required=False, default=5)
-    return part
+    return True

@@ -1,30 +1,31 @@
-"""Mock SMS / Email notification service.
-
-Always writes an in-app notification row. When sms/email is requested a delivery-log
-row is stored too and a "sent" line is logged to the console. Nothing is really sent.
-Callers are responsible for committing the session.
-"""
-import logging
-
 from extensions import db
 from models import Notification, User
 
-log = logging.getLogger("vscms.notify")
+def send_notification(user_id: int, message: str, channel: str = 'in_app') -> Notification:
+    """
+    Creates an in-app notification and simulates SMS/Email delivery if channel is specified.
+    """
+    notif = Notification(
+        User_ID=user_id,
+        Message=message,
+        Channel=channel,
+        Is_Read=False
+    )
+    db.session.add(notif)
+    if channel in ['sms', 'email']:
+        print(f"[MOCK {channel.upper()} SENT to User #{user_id}]: {message}")
+    return notif
 
+def notify_admins(message: str, channel: str = 'in_app') -> list:
+    """
+    Sends a notification to all active system administrators.
+    """
+    admins = User.query.filter_by(Role='admin', Is_Active=True).all()
+    created = []
+    for admin in admins:
+        notif = send_notification(admin.User_ID, message, channel=channel)
+        created.append(notif)
+    return created
 
-def notify(user_id, message, sms=False, email=False):
-    user = db.session.get(User, user_id)
-    if not user:
-        return
-    db.session.add(Notification(user_id=user_id, message=message, channel="in_app"))
-    if sms:
-        log.info("SMS sent to %s: %s", user.contact, message)
-        db.session.add(Notification(user_id=user_id, message=message, channel="sms", is_read=True))
-    if email:
-        log.info("Email sent to %s: %s", user.email, message)
-        db.session.add(Notification(user_id=user_id, message=message, channel="email", is_read=True))
-
-
-def notify_admins(message):
-    for admin in User.query.filter_by(role="admin", is_active=True).all():
-        notify(admin.id, message)
+def notify_user(user_id: int, message: str, channel: str = 'in_app') -> Notification:
+    return send_notification(user_id, message, channel=channel)
