@@ -6,18 +6,16 @@ from models import (
     Time_Slot, Service_Request, Invoice
 )
 from services.booking_service import ensure_slots_for_date
+from services.tenancy import get_current_center_id, get_or_404_in_center
 
 center_bp = Blueprint('center', __name__, url_prefix='/api/center')
 
 def get_user_center(user):
-    target_center_id = user.center_id
-    if not target_center_id and user.owned_centers:
-        return user.owned_centers[0]
-    if not target_center_id and hasattr(user, 'owned_center') and user.owned_center:
-        target_center_id = user.owned_center.id
+    target_center_id = get_current_center_id(user)
     if not target_center_id:
-        return Service_Center.query.first()
+        return None
     return db.session.get(Service_Center, target_center_id)
+
 
 # ========================================================
 # CENTER PROFILE
@@ -26,7 +24,10 @@ def get_user_center(user):
 @center_bp.route('/profile', methods=['GET'])
 @role_required('admin', 'center', 'platform_admin')
 def get_center_profile():
-    center = get_user_center(request.current_user)
+    center_id = get_current_center_id(request.current_user)
+    if not center_id:
+        return jsonify({"error": "Service center not found", "code": "NOT_FOUND"}), 404
+    center = db.session.get(Service_Center, center_id)
     if not center:
         return jsonify({"error": "Service center not found", "code": "NOT_FOUND"}), 404
 
@@ -35,9 +36,10 @@ def get_center_profile():
 @center_bp.route('/profile', methods=['PUT'])
 @role_required('admin', 'center', 'platform_admin')
 def update_center_profile():
-    center = get_user_center(request.current_user)
-    if not center:
-        center = db.session.get(Service_Center, 1)
+    center_id = get_current_center_id(request.current_user)
+    if not center_id:
+        return jsonify({"error": "Service center not found", "code": "NOT_FOUND"}), 404
+    center = db.session.get(Service_Center, center_id)
     if not center:
         return jsonify({"error": "Service center not found", "code": "NOT_FOUND"}), 404
 
@@ -87,13 +89,13 @@ def update_center_profile():
 @center_bp.route('/services', methods=['GET'])
 @role_required('admin', 'center', 'platform_admin')
 def get_center_services():
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    if not center:
+    center_id = get_current_center_id(request.current_user)
+    if not center_id:
         return jsonify({"error": "Center not found", "code": "NOT_FOUND"}), 404
 
     # All catalog services
     catalog = Service.query.all()
-    center_services = Center_Service.query.filter_by(center_id=center.id).all()
+    center_services = Center_Service.query.filter_by(center_id=center_id).all()
     cs_map = {cs.service_id: cs for cs in center_services}
 
     results = []
@@ -111,13 +113,13 @@ def get_center_services():
             "is_active": cs.is_active if cs else False
         })
 
-    return jsonify({"services": results, "center_id": center.id}), 200
+    return jsonify({"services": results, "center_id": center_id}), 200
 
 @center_bp.route('/services', methods=['POST'])
 @role_required('admin', 'center', 'platform_admin')
 def configure_center_service():
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    if not center:
+    center_id = get_current_center_id(request.current_user)
+    if not center_id:
         return jsonify({"error": "Center not found", "code": "NOT_FOUND"}), 404
 
     data = request.get_json() or {}
@@ -133,14 +135,14 @@ def configure_center_service():
     if not catalog_svc:
         return jsonify({"error": "Catalog service not found", "code": "NOT_FOUND"}), 404
 
-    cs = Center_Service.query.filter_by(center_id=center.id, service_id=service_id).first()
+    cs = Center_Service.query.filter_by(center_id=center_id, service_id=service_id).first()
     if cs:
         cs.price = float(price)
         cs.estimated_hours = float(estimated_hours)
         cs.is_active = bool(is_active)
     else:
         cs = Center_Service(
-            center_id=center.id,
+            center_id=center_id,
             service_id=service_id,
             price=float(price),
             estimated_hours=float(estimated_hours),
@@ -154,13 +156,8 @@ def configure_center_service():
 @center_bp.route('/services/<int:center_service_id>', methods=['PUT'])
 @role_required('admin', 'center', 'platform_admin')
 def update_center_service(center_service_id):
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    cs = db.session.get(Center_Service, center_service_id)
-    if not cs:
-        return jsonify({"error": "Center service not found", "code": "NOT_FOUND"}), 404
-
-    if center and cs.center_id != center.id:
-        return jsonify({"error": "Forbidden: This service belongs to another center", "code": "FORBIDDEN"}), 403
+    center_id = get_current_center_id(request.current_user)
+    cs = get_or_404_in_center(Center_Service, center_service_id, center_id)
 
     data = request.get_json() or {}
     if 'price' in data and data['price'] is not None:
@@ -176,13 +173,8 @@ def update_center_service(center_service_id):
 @center_bp.route('/services/<int:center_service_id>', methods=['DELETE'])
 @role_required('admin', 'center', 'platform_admin')
 def disable_center_service(center_service_id):
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    cs = db.session.get(Center_Service, center_service_id)
-    if not cs:
-        return jsonify({"error": "Center service not found", "code": "NOT_FOUND"}), 404
-
-    if center and cs.center_id != center.id:
-        return jsonify({"error": "Forbidden", "code": "FORBIDDEN"}), 403
+    center_id = get_current_center_id(request.current_user)
+    cs = get_or_404_in_center(Center_Service, center_service_id, center_id)
 
     cs.is_active = False
     db.session.commit()
@@ -196,18 +188,18 @@ def disable_center_service(center_service_id):
 @center_bp.route('/mechanics', methods=['GET'])
 @role_required('admin', 'center', 'platform_admin')
 def list_center_mechanics():
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    if not center:
+    center_id = get_current_center_id(request.current_user)
+    if not center_id:
         return jsonify({"error": "Center not found", "code": "NOT_FOUND"}), 404
 
-    mechanics = Mechanic.query.filter_by(center_id=center.id).all()
+    mechanics = Mechanic.query.filter_by(center_id=center_id).all()
     return jsonify({"mechanics": [m.to_dict() for m in mechanics]}), 200
 
 @center_bp.route('/mechanics', methods=['POST'])
 @role_required('admin', 'center', 'platform_admin')
 def add_center_mechanic():
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    if not center:
+    center_id = get_current_center_id(request.current_user)
+    if not center_id:
         return jsonify({"error": "Center not found", "code": "NOT_FOUND"}), 404
 
     data = request.get_json() or {}
@@ -234,7 +226,7 @@ def add_center_mechanic():
         Contact=phone,
         Password_Hash=hash_password(password),
         Role='mechanic',
-        center_id=center.id,
+        center_id=center_id,
         Is_Active=True
     )
     db.session.add(user)
@@ -243,7 +235,7 @@ def add_center_mechanic():
     # Create Mechanic Profile
     mech = Mechanic(
         User_ID=user.User_ID,
-        center_id=center.id,
+        center_id=center_id,
         Specialization=specialization,
         experience_years=int(experience),
         rating=5.0,
@@ -258,13 +250,8 @@ def add_center_mechanic():
 @center_bp.route('/mechanics/<int:mechanic_id>', methods=['PUT'])
 @role_required('admin', 'center', 'platform_admin')
 def update_center_mechanic(mechanic_id):
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    mech = db.session.get(Mechanic, mechanic_id)
-    if not mech:
-        return jsonify({"error": "Mechanic not found", "code": "NOT_FOUND"}), 404
-
-    if center and mech.center_id != center.id:
-        return jsonify({"error": "Forbidden: Mechanic belongs to another center", "code": "FORBIDDEN"}), 403
+    center_id = get_current_center_id(request.current_user)
+    mech = get_or_404_in_center(Mechanic, mechanic_id, center_id)
 
     data = request.get_json() or {}
     if 'name' in data and data['name'].strip():
@@ -284,85 +271,56 @@ def update_center_mechanic(mechanic_id):
 
 
 # ========================================================
-# CENTER SPARE PARTS INVENTORY
+# CENTER SPARE PARTS INVENTORY (Delegated to routes.inventory)
 # ========================================================
 
 @center_bp.route('/parts', methods=['GET'])
 @role_required('admin', 'center', 'platform_admin')
 def list_center_parts():
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    if not center:
-        return jsonify({"error": "Center not found", "code": "NOT_FOUND"}), 404
+    from routes.inventory import list_parts
+    return list_parts()
 
-    parts = Spare_Part.query.filter_by(center_id=center.id).order_by(Spare_Part.Name.asc()).all()
-    return jsonify({"parts": [p.to_dict() for p in parts]}), 200
+@center_bp.route('/parts/summary', methods=['GET'])
+@role_required('admin', 'center', 'platform_admin')
+def get_center_parts_summary():
+    from routes.inventory import get_inventory_summary
+    return get_inventory_summary()
+
+@center_bp.route('/parts/low-stock', methods=['GET'])
+@role_required('admin', 'center', 'platform_admin')
+def get_center_low_stock_parts():
+    from routes.inventory import get_low_stock_parts
+    return get_low_stock_parts()
 
 @center_bp.route('/parts', methods=['POST'])
 @role_required('admin', 'center', 'platform_admin')
 def add_center_part():
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    if not center:
-        return jsonify({"error": "Center not found", "code": "NOT_FOUND"}), 404
-
-    data = request.get_json() or {}
-    name = data.get('name', '').strip()
-    price = data.get('price')
-    quantity = data.get('quantity_in_stock', 0)
-    min_threshold = data.get('min_threshold', 5)
-
-    if not name or price is None:
-        return jsonify({"error": "Part name and price are required", "code": "VALIDATION_ERROR"}), 400
-
-    part = Spare_Part(
-        center_id=center.id,
-        Name=name,
-        Price=float(price),
-        Quantity_In_Stock=int(quantity),
-        Min_Threshold=int(min_threshold)
-    )
-    db.session.add(part)
-    db.session.commit()
-
-    return jsonify({"message": "Part added to inventory", "part": part.to_dict()}), 201
+    from routes.inventory import add_part
+    return add_part()
 
 @center_bp.route('/parts/<int:part_id>', methods=['PUT'])
 @role_required('admin', 'center', 'platform_admin')
 def update_center_part(part_id):
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    part = db.session.get(Spare_Part, part_id)
-    if not part:
-        return jsonify({"error": "Part not found", "code": "NOT_FOUND"}), 404
-
-    if center and part.center_id != center.id:
-        return jsonify({"error": "Forbidden", "code": "FORBIDDEN"}), 403
-
-    data = request.get_json() or {}
-    if 'name' in data and data['name'].strip():
-        part.Name = data['name'].strip()
-    if 'price' in data and data['price'] is not None:
-        part.Price = float(data['price'])
-    if 'quantity_in_stock' in data and data['quantity_in_stock'] is not None:
-        part.Quantity_In_Stock = int(data['quantity_in_stock'])
-    if 'min_threshold' in data and data['min_threshold'] is not None:
-        part.Min_Threshold = int(data['min_threshold'])
-
-    db.session.commit()
-    return jsonify({"message": "Part updated", "part": part.to_dict()}), 200
+    from routes.inventory import update_part
+    return update_part(part_id)
 
 @center_bp.route('/parts/<int:part_id>', methods=['DELETE'])
 @role_required('admin', 'center', 'platform_admin')
 def delete_center_part(part_id):
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    part = db.session.get(Spare_Part, part_id)
-    if not part:
-        return jsonify({"error": "Part not found", "code": "NOT_FOUND"}), 404
+    from routes.inventory import delete_part
+    return delete_part(part_id)
 
-    if center and part.center_id != center.id:
-        return jsonify({"error": "Forbidden", "code": "FORBIDDEN"}), 403
+@center_bp.route('/parts/<int:part_id>/adjust', methods=['POST'])
+@role_required('admin', 'center', 'platform_admin')
+def adjust_center_part_stock(part_id):
+    from routes.inventory import adjust_part_stock
+    return adjust_part_stock(part_id)
 
-    db.session.delete(part)
-    db.session.commit()
-    return jsonify({"message": "Part deleted from inventory"}), 200
+@center_bp.route('/parts/load-defaults', methods=['POST'])
+@role_required('admin', 'center', 'platform_admin')
+def load_center_default_parts():
+    from routes.inventory import load_default_parts
+    return load_default_parts()
 
 
 # ========================================================
@@ -372,24 +330,19 @@ def delete_center_part(part_id):
 @center_bp.route('/slots', methods=['GET'])
 @role_required('admin', 'center', 'platform_admin')
 def list_center_slots():
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    if not center:
+    center_id = get_current_center_id(request.current_user)
+    if not center_id:
         return jsonify({"error": "Center not found", "code": "NOT_FOUND"}), 404
 
     target_date = request.args.get('date', date.today().isoformat())
-    slots = ensure_slots_for_date(target_date, center_id=center.id)
+    slots = ensure_slots_for_date(target_date, center_id=center_id)
     return jsonify({"date": target_date, "slots": [s.to_dict() for s in slots]}), 200
 
 @center_bp.route('/slots/<int:slot_id>', methods=['PUT'])
 @role_required('admin', 'center', 'platform_admin')
 def update_center_slot(slot_id):
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
-    slot = db.session.get(Time_Slot, slot_id)
-    if not slot:
-        return jsonify({"error": "Slot not found", "code": "NOT_FOUND"}), 404
-
-    if center and slot.center_id != center.id:
-        return jsonify({"error": "Forbidden", "code": "FORBIDDEN"}), 403
+    center_id = get_current_center_id(request.current_user)
+    slot = get_or_404_in_center(Time_Slot, slot_id, center_id)
 
     data = request.get_json() or {}
     capacity = data.get('capacity')
@@ -408,25 +361,28 @@ def update_center_slot(slot_id):
 @center_bp.route('/reports/summary', methods=['GET'])
 @role_required('admin', 'center', 'platform_admin')
 def center_summary_report():
-    center = get_user_center(request.current_user) or db.session.get(Service_Center, 1)
+    center_id = get_current_center_id(request.current_user)
+    if not center_id:
+        return jsonify({"error": "Center not found", "code": "NOT_FOUND"}), 404
+    center = db.session.get(Service_Center, center_id)
     if not center:
         return jsonify({"error": "Center not found", "code": "NOT_FOUND"}), 404
 
-    pending_count = Service_Request.query.filter_by(center_id=center.id, Status="Pending Approval").count()
-    accepted_count = Service_Request.query.filter_by(center_id=center.id, Status="Accepted").count()
+    pending_count = Service_Request.query.filter_by(center_id=center_id, Status="Pending Approval").count()
+    accepted_count = Service_Request.query.filter_by(center_id=center_id, Status="Accepted").count()
     active_count = Service_Request.query.filter(
-        Service_Request.center_id == center.id,
+        Service_Request.center_id == center_id,
         Service_Request.Status.in_(["Assigned", "In Progress", "Awaiting Parts"])
     ).count()
-    completed_count = Service_Request.query.filter_by(center_id=center.id, Status="Completed").count()
+    completed_count = Service_Request.query.filter_by(center_id=center_id, Status="Completed").count()
 
     # Center revenue
-    invoices = Invoice.query.filter_by(center_id=center.id, Status="Paid").all()
+    invoices = Invoice.query.filter_by(center_id=center_id, Status="Paid").all()
     total_revenue = sum(inv.Total_Amount for inv in invoices)
 
     # Low stock count
     low_stock = Spare_Part.query.filter(
-        Spare_Part.center_id == center.id,
+        Spare_Part.center_id == center_id,
         Spare_Part.Quantity_In_Stock <= Spare_Part.Min_Threshold
     ).count()
 

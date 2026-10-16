@@ -16,6 +16,16 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   const saveAuth = (newToken, newUser) => {
+    try {
+      sessionStorage.clear();
+      Object.keys(localStorage).forEach(key => {
+        if (key.startsWith('vscms_cache_') || key.startsWith('vscms_draft_')) {
+          localStorage.removeItem(key);
+        }
+      });
+    } catch (e) {
+      console.warn("Storage cleanup note:", e);
+    }
     setToken(newToken);
     setUser(newUser);
     localStorage.setItem('vscms_token', newToken);
@@ -25,8 +35,19 @@ export function AuthProvider({ children }) {
   const clearAuth = () => {
     setToken(null);
     setUser(null);
-    localStorage.removeItem('vscms_token');
-    localStorage.removeItem('vscms_user');
+    try {
+      localStorage.removeItem('vscms_token');
+      localStorage.removeItem('vscms_user');
+      localStorage.removeItem('token');
+      sessionStorage.clear();
+      Object.keys(localStorage).forEach(key => {
+        if (key.startsWith('vscms_cache_') || key.startsWith('vscms_draft_')) {
+          localStorage.removeItem(key);
+        }
+      });
+    } catch (e) {
+      console.warn("Storage cleanup note:", e);
+    }
   };
 
   const login = async (email, password, role) => {

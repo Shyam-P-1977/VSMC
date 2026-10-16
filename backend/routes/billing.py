@@ -3,15 +3,9 @@ from extensions import db, token_required, role_required
 from models import Invoice, Service_Request
 from services.billing_service import add_invoice_adjustment
 from services.payment_gateway import record_manual_payment
+from services.tenancy import get_current_center_id, scoped_invoices, get_or_404_in_center
 
 billing_bp = Blueprint('billing', __name__, url_prefix='/api/invoices')
-
-def verify_invoice_access(invoice, user):
-    if user.Role == 'admin':
-        return True
-    if user.Role == 'customer' and invoice.request and invoice.request.Customer_ID == user.User_ID:
-        return True
-    return False
 
 @billing_bp.route('', methods=['GET'])
 @token_required
@@ -21,8 +15,14 @@ def list_invoices():
 
     if user.Role == 'customer':
         query = Invoice.query.join(Service_Request).filter(Service_Request.Customer_ID == user.User_ID)
+    elif user.Role in ['admin', 'center', 'mechanic']:
+        center_id = get_current_center_id(user)
+        query = scoped_invoices(center_id)
+    elif user.Role == 'platform_admin':
+        param_cid = request.args.get('center_id', type=int)
+        query = scoped_invoices(param_cid) if param_cid else Invoice.query
     else:
-        query = Invoice.query
+        return jsonify({"invoices": []}), 200
 
     if status:
         query = query.filter(Invoice.Status == status)
@@ -34,12 +34,18 @@ def list_invoices():
 @token_required
 def get_invoice(invoice_id):
     user = request.current_user
-    invoice = db.session.get(Invoice, invoice_id)
-    if not invoice:
-        return jsonify({"error": "Invoice not found", "code": "NOT_FOUND"}), 404
-
-    if not verify_invoice_access(invoice, user):
-        return jsonify({"error": "Forbidden: You cannot view this invoice", "code": "FORBIDDEN"}), 403
+    if user.Role in ['admin', 'center', 'mechanic']:
+        invoice = get_or_404_in_center(Invoice, invoice_id)
+    elif user.Role == 'customer':
+        invoice = db.session.get(Invoice, invoice_id)
+        if not invoice or not invoice.request or invoice.request.Customer_ID != user.User_ID:
+            return jsonify({"error": "Invoice not found", "code": "NOT_FOUND"}), 404
+    elif user.Role == 'platform_admin':
+        invoice = db.session.get(Invoice, invoice_id)
+        if not invoice:
+            return jsonify({"error": "Invoice not found", "code": "NOT_FOUND"}), 404
+    else:
+        return jsonify({"error": "Forbidden", "code": "FORBIDDEN"}), 403
 
     return jsonify({"invoice": invoice.to_dict()}), 200
 
@@ -47,27 +53,39 @@ def get_invoice(invoice_id):
 @token_required
 def download_invoice_data(invoice_id):
     user = request.current_user
-    invoice = db.session.get(Invoice, invoice_id)
-    if not invoice:
-        return jsonify({"error": "Invoice not found", "code": "NOT_FOUND"}), 404
+    if user.Role in ['admin', 'center', 'mechanic']:
+        invoice = get_or_404_in_center(Invoice, invoice_id)
+    elif user.Role == 'customer':
+        invoice = db.session.get(Invoice, invoice_id)
+        if not invoice or not invoice.request or invoice.request.Customer_ID != user.User_ID:
+            return jsonify({"error": "Invoice not found", "code": "NOT_FOUND"}), 404
+    elif user.Role == 'platform_admin':
+        invoice = db.session.get(Invoice, invoice_id)
+        if not invoice:
+            return jsonify({"error": "Invoice not found", "code": "NOT_FOUND"}), 404
+    else:
+        return jsonify({"error": "Forbidden", "code": "FORBIDDEN"}), 403
 
-    if not verify_invoice_access(invoice, user):
-        return jsonify({"error": "Forbidden: You cannot download this invoice", "code": "FORBIDDEN"}), 403
-
+    center = invoice.center or (invoice.request.center if invoice.request else None)
     invoice_data = invoice.to_dict()
     invoice_data["Company"] = {
-        "Name": "VSCMS - Premium Vehicle Service Center",
+        "Name": center.name if center else "VSCMS - Authorized Service Center",
         "GSTIN": "27AABCV1234F1Z8",
-        "Address": "Plot 42, Auto Hub Way, Tech Industrial Park, Pune, MH, India",
-        "Support_Phone": "+91 98765 43210",
-        "Support_Email": "support@vscms.com"
+        "Address": center.address if center else "Maharashtra, India",
+        "Support_Phone": center.phone if center else "+91 98765 43210",
+        "Support_Email": center.email if center else "support@vscms.com"
     }
     return jsonify({"downloadable_invoice": invoice_data}), 200
 
 @billing_bp.route('/<int:invoice_id>/adjustment', methods=['POST'])
-@role_required('admin')
+@role_required('admin', 'center', 'platform_admin')
 def create_adjustment(invoice_id):
-    invoice = db.session.get(Invoice, invoice_id)
+    user = request.current_user
+    if user.Role == 'platform_admin':
+        invoice = db.session.get(Invoice, invoice_id)
+    else:
+        invoice = get_or_404_in_center(Invoice, invoice_id)
+
     if not invoice:
         return jsonify({"error": "Invoice not found", "code": "NOT_FOUND"}), 404
 
@@ -94,9 +112,14 @@ def create_adjustment(invoice_id):
         return jsonify({"error": str(e), "code": "INVALID_ADJUSTMENT"}), 400
 
 @billing_bp.route('/<int:invoice_id>/mark-paid', methods=['POST'])
-@role_required('admin')
+@role_required('admin', 'center', 'platform_admin')
 def mark_as_paid(invoice_id):
-    invoice = db.session.get(Invoice, invoice_id)
+    user = request.current_user
+    if user.Role == 'platform_admin':
+        invoice = db.session.get(Invoice, invoice_id)
+    else:
+        invoice = get_or_404_in_center(Invoice, invoice_id)
+
     if not invoice:
         return jsonify({"error": "Invoice not found", "code": "NOT_FOUND"}), 404
 
@@ -121,7 +144,6 @@ def modify_or_delete_invoice(invoice_id):
     if not invoice:
         return jsonify({"error": "Invoice not found", "code": "NOT_FOUND"}), 404
 
-    # Direct edits/deletions on invoices (especially paid ones) are strictly prohibited
     if invoice.Status == 'Paid':
         return jsonify({
             "error": "Paid invoices are immutable and cannot be edited or deleted. Adjustments must be recorded via Invoice Adjustments.",

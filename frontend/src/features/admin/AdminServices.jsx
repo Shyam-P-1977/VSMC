@@ -108,10 +108,19 @@ export function AdminServices() {
 
     try {
       setSavingService(true);
+      const basePriceNum = parseFloat(serviceForm.Base_Price);
+      const estHoursNum = parseFloat(serviceForm.Estimated_Hours || 1.0);
       const payload = {
-        ...serviceForm,
-        Base_Price: parseFloat(serviceForm.Base_Price),
-        Estimated_Hours: parseFloat(serviceForm.Estimated_Hours || 1.0)
+        name: serviceForm.Name.trim(),
+        Name: serviceForm.Name.trim(),
+        description: serviceForm.Description ? serviceForm.Description.trim() : '',
+        Description: serviceForm.Description ? serviceForm.Description.trim() : '',
+        base_price: basePriceNum,
+        Base_Price: basePriceNum,
+        estimated_hours: estHoursNum,
+        Estimated_Hours: estHoursNum,
+        is_active: Boolean(serviceForm.Is_Active),
+        Is_Active: Boolean(serviceForm.Is_Active)
       };
 
       if (editingServiceId) {
@@ -132,10 +141,12 @@ export function AdminServices() {
 
   const handleToggleServiceActive = async (svc) => {
     try {
+      const nextActive = !svc.Is_Active;
       await catalogApi.updateService(svc.Service_ID, {
-        Is_Active: !svc.Is_Active
+        is_active: nextActive,
+        Is_Active: nextActive
       });
-      toast.success(`Service ${!svc.Is_Active ? 'activated' : 'deactivated'}`);
+      toast.success(`Service ${nextActive ? 'activated' : 'deactivated'}`);
       fetchServices();
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to toggle service status');

@@ -874,11 +874,9 @@ export function BookServiceWizard() {
 
               {/* Photos Dropzone (Max 3) */}
               <div className="pt-2">
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 mb-1.5">
-                  Attach Problem Photos (Max 3, Optional)
-                </label>
                 <FileDropzone
                   files={problemPhotos}
+                  onChange={setProblemPhotos}
                   onFilesChange={setProblemPhotos}
                   maxFiles={3}
                 />
@@ -986,6 +984,35 @@ export function BookServiceWizard() {
                   <span className="text-slate-500">Urgency: <strong className="text-slate-900 dark:text-white">{urgency}</strong></span>
                   <span className="text-slate-500">Photos attached: <strong className="text-slate-900 dark:text-white">{problemPhotos.length}</strong></span>
                 </div>
+
+                {/* Attached Photo Previews */}
+                {problemPhotos.length > 0 && (
+                  <div className="pt-3 border-t border-slate-200 dark:border-slate-700">
+                    <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wider block mb-2">
+                      Uploaded Photo Previews ({problemPhotos.length}):
+                    </span>
+                    <div className="grid grid-cols-3 gap-3">
+                      {problemPhotos.map((photo, pIdx) => {
+                        const previewUrl = typeof photo === 'string' ? photo : URL.createObjectURL(photo);
+                        return (
+                          <div
+                            key={pIdx}
+                            className="relative rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden aspect-video bg-slate-100 dark:bg-slate-800 shadow-2xs"
+                          >
+                            <img
+                              src={previewUrl}
+                              alt={photo.name || `Photo ${pIdx + 1}`}
+                              className="w-full h-full object-cover"
+                            />
+                            <div className="absolute bottom-0 inset-x-0 bg-slate-950/80 text-white text-[9px] truncate px-2 py-0.5">
+                              {photo.name}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Price Estimate */}

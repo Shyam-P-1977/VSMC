@@ -6,6 +6,7 @@ from extensions import db, token_required, role_required, hash_password, generat
 from models import Service, Time_Slot, Service_Center, Center_Service, User
 from services.booking_service import ensure_slots_for_date, check_slot_availability, find_alternate_slots
 from services.location_data import get_all_cities, get_areas_for_city, haversine_distance, find_nearest_area, MAHARASHTRA_LOCATIONS
+from services.inventory_service import seed_default_parts
 
 catalog_bp = Blueprint('catalog', __name__, url_prefix='/api')
 
@@ -291,11 +292,17 @@ def register_center():
     try:
         today = date.today()
         for i in range(14):
-            ensure_slots_for_date(center.id, (today + timedelta(days=i)).isoformat())
+            ensure_slots_for_date((today + timedelta(days=i)).isoformat(), center_id=center.id)
     except Exception as e:
         print("[*] Slot generation notice for new center:", e)
 
     db.session.commit()
+
+    # Seed default spare-parts catalog for the newly registered center
+    try:
+        seed_default_parts(center.id)
+    except Exception as e:
+        print("[*] Default parts seeding notice for new center:", e)
 
     token = generate_jwt(owner)
     return jsonify({
@@ -364,10 +371,11 @@ def list_services():
 @role_required('admin', 'platform_admin', 'center')
 def create_service():
     data = request.get_json() or {}
-    name = data.get('name', '').strip()
-    description = data.get('description', '').strip()
-    base_price = data.get('base_price')
-    estimated_hours = data.get('estimated_hours', 1.0)
+    name = (data.get('name') or data.get('Name') or '').strip()
+    description = (data.get('description') or data.get('Description') or '').strip()
+    base_price = data.get('base_price') if data.get('base_price') is not None else data.get('Base_Price')
+    estimated_hours = data.get('estimated_hours') if data.get('estimated_hours') is not None else data.get('Estimated_Hours', 1.0)
+    is_active = data.get('is_active') if data.get('is_active') is not None else data.get('Is_Active', True)
 
     if not name or base_price is None:
         return jsonify({"error": "Service name and base price are required", "code": "VALIDATION_ERROR"}), 400
@@ -377,9 +385,27 @@ def create_service():
         Description=description,
         Base_Price=float(base_price),
         Estimated_Hours=float(estimated_hours),
-        Is_Active=True
+        Is_Active=bool(is_active)
     )
     db.session.add(service)
+    db.session.flush()
+
+    # If the user belongs to a center, also register in center_services
+    curr_user = getattr(request, 'current_user', None)
+    if curr_user:
+        cid = curr_user.center_id or (curr_user.owned_centers[0].id if curr_user.owned_centers else None)
+        if cid:
+            cs = Center_Service.query.filter_by(center_id=cid, service_id=service.Service_ID).first()
+            if not cs:
+                cs = Center_Service(
+                    center_id=cid,
+                    service_id=service.Service_ID,
+                    price=service.Base_Price,
+                    estimated_hours=service.Estimated_Hours,
+                    is_active=service.Is_Active
+                )
+                db.session.add(cs)
+
     db.session.commit()
     return jsonify({"message": "Service created", "service": service.to_dict()}), 201
 
@@ -391,22 +417,41 @@ def update_service(service_id):
         return jsonify({"error": "Service not found", "code": "NOT_FOUND"}), 404
 
     data = request.get_json() or {}
-    if 'name' in data and data['name'].strip():
-        service.Name = data['name'].strip()
-    if 'description' in data:
-        service.Description = data['description']
-    if 'base_price' in data:
-        service.Base_Price = float(data['base_price'])
-    if 'estimated_hours' in data:
-        service.Estimated_Hours = float(data['estimated_hours'])
-    if 'is_active' in data:
-        service.Is_Active = bool(data['is_active'])
+    if 'name' in data or 'Name' in data:
+        val = (data.get('name') or data.get('Name') or '').strip()
+        if val:
+            service.Name = val
+    if 'description' in data or 'Description' in data:
+        service.Description = data.get('description') if 'description' in data else data.get('Description')
+    if 'base_price' in data or 'Base_Price' in data:
+        val = data.get('base_price') if 'base_price' in data else data.get('Base_Price')
+        if val is not None:
+            service.Base_Price = float(val)
+    if 'estimated_hours' in data or 'Estimated_Hours' in data:
+        val = data.get('estimated_hours') if 'estimated_hours' in data else data.get('Estimated_Hours')
+        if val is not None:
+            service.Estimated_Hours = float(val)
+    if 'is_active' in data or 'Is_Active' in data:
+        val = data.get('is_active') if 'is_active' in data else data.get('Is_Active')
+        if val is not None:
+            service.Is_Active = bool(val)
+
+    # Sync with Center_Service if applicable
+    curr_user = getattr(request, 'current_user', None)
+    if curr_user:
+        cid = curr_user.center_id or (curr_user.owned_centers[0].id if curr_user.owned_centers else None)
+        if cid:
+            cs = Center_Service.query.filter_by(center_id=cid, service_id=service.Service_ID).first()
+            if cs:
+                cs.price = service.Base_Price
+                cs.estimated_hours = service.Estimated_Hours
+                cs.is_active = service.Is_Active
 
     db.session.commit()
     return jsonify({"message": "Service updated", "service": service.to_dict()}), 200
 
 @catalog_bp.route('/services/<int:service_id>', methods=['DELETE'])
-@role_required('admin', 'platform_admin', 'center')
+@role_required('platform_admin')
 def delete_service(service_id):
     service = db.session.get(Service, service_id)
     if not service:
@@ -430,11 +475,20 @@ def get_slots():
     }), 200
 
 @catalog_bp.route('/slots/<int:slot_id>', methods=['PUT'])
-@role_required('admin', 'center')
+@role_required('admin', 'center', 'platform_admin')
 def update_slot_capacity(slot_id):
-    slot = db.session.get(Time_Slot, slot_id)
-    if not slot:
-        return jsonify({"error": "Slot not found", "code": "NOT_FOUND"}), 404
+    from services.tenancy import get_current_center_id, get_or_404_in_center
+    user = request.current_user
+    if user.Role == 'platform_admin':
+        slot = db.session.get(Time_Slot, slot_id)
+        if not slot:
+            return jsonify({"error": "Slot not found", "code": "NOT_FOUND"}), 404
+    else:
+        center_id = get_current_center_id(user)
+        try:
+            slot = get_or_404_in_center(Time_Slot, slot_id, center_id)
+        except Exception:
+            return jsonify({"error": "Slot not found", "code": "NOT_FOUND"}), 404
 
     data = request.get_json() or {}
     capacity = data.get('capacity')

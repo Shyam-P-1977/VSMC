@@ -172,7 +172,9 @@ class Mechanic(db.Model):
             "email": email,
             "Contact": phone,
             "phone": phone,
-            "Is_Active": user_dict.get("Is_Active", True)
+            "Is_Active": user_dict.get("Is_Active", True),
+            "User": user_dict,
+            "user": user_dict
         }
 
 
@@ -450,27 +452,94 @@ class Status_History(db.Model):
 
 class Spare_Part(db.Model):
     __tablename__ = 'spare_parts'
+    __table_args__ = (
+        db.UniqueConstraint('center_id', 'sku', name='uq_center_part_sku'),
+    )
 
     Part_ID = db.Column(db.Integer, primary_key=True)
     center_id = db.Column(db.Integer, db.ForeignKey('service_centers.id'), nullable=True)
+    sku = db.Column(db.String(50), nullable=True, index=True)
     Name = db.Column(db.String(120), nullable=False)
+    category = db.Column(db.String(80), default='General', nullable=False)
+    unit = db.Column(db.String(20), default='piece', nullable=False)
     Price = db.Column(db.Float, nullable=False)
     Quantity_In_Stock = db.Column(db.Integer, default=0, nullable=False)
     Min_Threshold = db.Column(db.Integer, default=5, nullable=False)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
     Updated_At = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     center = db.relationship('Service_Center', back_populates='parts')
+    adjustments = db.relationship('Stock_Adjustment', back_populates='part', cascade='all, delete-orphan')
+
+    @property
+    def stock_status(self):
+        from data.default_parts import calculate_stock_status
+        return calculate_stock_status(self.Quantity_In_Stock, self.Min_Threshold)["label"]
+
+    @property
+    def status_key(self):
+        from data.default_parts import calculate_stock_status
+        return calculate_stock_status(self.Quantity_In_Stock, self.Min_Threshold)["status"]
+
+    def to_dict(self):
+        from data.default_parts import calculate_stock_status
+        status_info = calculate_stock_status(self.Quantity_In_Stock, self.Min_Threshold)
+        qty = self.Quantity_In_Stock or 0
+        price = self.Price or 0.0
+        return {
+            "Part_ID": self.Part_ID,
+            "id": self.Part_ID,
+            "center_id": self.center_id,
+            "sku": self.sku,
+            "SKU": self.sku,
+            "Name": self.Name,
+            "name": self.Name,
+            "category": self.category or "General",
+            "Category": self.category or "General",
+            "unit": self.unit or "piece",
+            "Unit": self.unit or "piece",
+            "Price": price,
+            "price": price,
+            "Quantity_In_Stock": qty,
+            "quantity": qty,
+            "quantity_in_stock": qty,
+            "Min_Threshold": self.Min_Threshold,
+            "min_threshold": self.Min_Threshold,
+            "min_level": self.Min_Threshold,
+            "is_active": self.is_active,
+            "Is_Active": self.is_active,
+            "status": status_info["status"],
+            "status_label": status_info["label"],
+            "badge_variant": status_info["badge_variant"],
+            "Is_Low_Stock": status_info["status"] in ["low", "out"],
+            "Is_Out_Of_Stock": status_info["status"] == "out",
+            "stock_value": round(price * qty, 2),
+            "Updated_At": self.Updated_At.isoformat() if self.Updated_At else None
+        }
+
+
+class Stock_Adjustment(db.Model):
+    __tablename__ = 'stock_adjustments'
+
+    id = db.Column(db.Integer, primary_key=True)
+    part_id = db.Column(db.Integer, db.ForeignKey('spare_parts.Part_ID', ondelete='CASCADE'), nullable=False)
+    delta = db.Column(db.Integer, nullable=False)
+    reason = db.Column(db.String(255), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.User_ID'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    part = db.relationship('Spare_Part', back_populates='adjustments')
+    user = db.relationship('User')
 
     def to_dict(self):
         return {
-            "Part_ID": self.Part_ID,
-            "center_id": self.center_id,
-            "Name": self.Name,
-            "Price": self.Price,
-            "Quantity_In_Stock": self.Quantity_In_Stock,
-            "Min_Threshold": self.Min_Threshold,
-            "Is_Low_Stock": self.Quantity_In_Stock <= self.Min_Threshold,
-            "Updated_At": self.Updated_At.isoformat() if self.Updated_At else None
+            "id": self.id,
+            "part_id": self.part_id,
+            "delta": self.delta,
+            "reason": self.reason,
+            "user_id": self.user_id,
+            "user_name": self.user.Name if self.user else "System",
+            "created_at": self.created_at.isoformat() if self.created_at else None
         }
 
 
@@ -492,6 +561,10 @@ class Job_Part_Used(db.Model):
             "Request_ID": self.Request_ID,
             "Part_ID": self.Part_ID,
             "Part_Name": self.part.Name if self.part else None,
+            "sku": self.part.sku if self.part else None,
+            "SKU": self.part.sku if self.part else None,
+            "unit": self.part.unit if self.part else "piece",
+            "category": self.part.category if self.part else "General",
             "Quantity": self.Quantity,
             "Unit_Price_At_Time": self.Unit_Price_At_Time,
             "Total_Price": round(self.Quantity * self.Unit_Price_At_Time, 2)

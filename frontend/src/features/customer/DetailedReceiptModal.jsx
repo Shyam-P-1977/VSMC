@@ -149,11 +149,22 @@ export function DetailedReceiptModal({ isOpen, onClose, receipt }) {
                   <tr key={idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/40">
                     <td className="p-3 font-semibold text-slate-500">
                       <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-[10px]">
-                        {item.item_type || 'Service'}
+                        {item.item_type || item.type || 'Service'}
                       </span>
                     </td>
-                    <td className="p-3 font-medium text-slate-900 dark:text-white">{item.description}</td>
-                    <td className="p-3 text-center font-mono">{item.quantity || 1}</td>
+                    <td className="p-3 font-medium text-slate-900 dark:text-white">
+                      <div className="flex items-center gap-2">
+                        {item.sku && (
+                          <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-teal-50 dark:bg-teal-950/60 text-teal-800 dark:text-teal-300 border border-teal-200 dark:border-teal-800">
+                            {item.sku}
+                          </span>
+                        )}
+                        <span>{item.description}</span>
+                      </div>
+                    </td>
+                    <td className="p-3 text-center font-mono">
+                      {item.quantity || 1} {item.unit ? <span className="text-[10px] text-slate-400">({item.unit})</span> : ''}
+                    </td>
                     <td className="p-3 text-right font-mono">₹{Number(item.unit_price || 0).toFixed(2)}</td>
                     <td className="p-3 text-right font-mono font-bold text-slate-900 dark:text-white">
                       ₹{Number(item.amount || (item.quantity * item.unit_price)).toFixed(2)}

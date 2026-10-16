@@ -26,6 +26,7 @@ export default {
           hover: '#E5C000',
           tint: '#FFF9D6',
         },
+        'signal-yellow': '#FFD60A',
         ink: {
           DEFAULT: '#0F1B1B',
           light: '#243434',

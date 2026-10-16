@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import {
   Wrench, Clock, CheckCircle2, AlertTriangle, User,
-  Plus, Trash2, ArrowRight, Eye, ShieldAlert, Sparkles, Check
+  Plus, Trash2, ArrowRight, Eye, ShieldAlert, Sparkles, Check, Search
 } from 'lucide-react';
 import { DashboardLayout } from '../../app/layouts/DashboardLayout';
 import {
@@ -21,8 +21,10 @@ export function MechanicDashboard() {
   const [selectedJob, setSelectedJob] = useState(null);
   const [jobDetailLoading, setJobDetailLoading] = useState(false);
 
-  // Available spare parts for dropdown
+  // Available spare parts and grouped options
   const [spareParts, setSpareParts] = useState([]);
+  const [jobPartsOptions, setJobPartsOptions] = useState(null);
+  const [partSearch, setPartSearch] = useState('');
 
   // Forms inside drawer
   const [partId, setPartId] = useState('');
@@ -68,8 +70,18 @@ export function MechanicDashboard() {
     try {
       setJobDetailLoading(true);
       setDrawerOpen(true);
-      const res = await requestApi.getById(job.Request_ID);
+      setPartSearch('');
+      setPartId('');
+      setPartQty(1);
+      const [res, partsRes] = await Promise.all([
+        requestApi.getById(job.Request_ID),
+        inventoryApi.getMechanicJobOptions(job.Request_ID).catch(() => null)
+      ]);
       setSelectedJob(res.request);
+      if (partsRes) {
+        setJobPartsOptions(partsRes);
+        setSpareParts(partsRes.parts || []);
+      }
     } catch {
       toast.error('Failed to load job details');
     } finally {
@@ -96,15 +108,32 @@ export function MechanicDashboard() {
       toast.error('Please select a spare part');
       return;
     }
+
+    const chosenPart = spareParts.find(p => String(p.Part_ID || p.id) === String(partId));
+    if (chosenPart && (chosenPart.Quantity_In_Stock ?? chosenPart.quantity ?? 0) === 0) {
+      toast.error('Selected part is out of stock');
+      return;
+    }
+    if (chosenPart && Number(partQty) > (chosenPart.Quantity_In_Stock ?? chosenPart.quantity ?? 0)) {
+      toast.error(`Requested quantity (${partQty}) exceeds available stock (${chosenPart.Quantity_In_Stock ?? chosenPart.quantity})`);
+      return;
+    }
+
     try {
       setAddingPart(true);
       await mechanicApi.logPart(selectedJob.Request_ID, Number(partId), Number(partQty));
       toast.success('Part added to job and stock deducted');
       setPartId('');
       setPartQty(1);
-      const refreshed = await requestApi.getById(selectedJob.Request_ID);
+      const [refreshed, partsRes] = await Promise.all([
+        requestApi.getById(selectedJob.Request_ID),
+        inventoryApi.getMechanicJobOptions(selectedJob.Request_ID).catch(() => null)
+      ]);
       setSelectedJob(refreshed.request);
-      fetchParts();
+      if (partsRes) {
+        setJobPartsOptions(partsRes);
+        setSpareParts(partsRes.parts || []);
+      }
       fetchJobs();
     } catch (err) {
       toast.error(err.response?.data?.error || 'Stock deduction failed');
@@ -123,9 +152,15 @@ export function MechanicDashboard() {
     try {
       await mechanicApi.removePart(selectedJob.Request_ID, partUsedId);
       toast.success('Part removed and stock replenished');
-      const refreshed = await requestApi.getById(selectedJob.Request_ID);
+      const [refreshed, partsRes] = await Promise.all([
+        requestApi.getById(selectedJob.Request_ID),
+        inventoryApi.getMechanicJobOptions(selectedJob.Request_ID).catch(() => null)
+      ]);
       setSelectedJob(refreshed.request);
-      fetchParts();
+      if (partsRes) {
+        setJobPartsOptions(partsRes);
+        setSpareParts(partsRes.parts || []);
+      }
       fetchJobs();
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to remove part');
@@ -442,11 +477,20 @@ export function MechanicDashboard() {
                       className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between text-xs"
                     >
                       <div>
-                        <span className="font-bold text-slate-900 dark:text-white">{pu.Part_Name}</span>
-                        <span className="text-slate-400 font-mono ml-2">Qty: {pu.Quantity} × ₹{pu.Unit_Price_At_Time}</span>
+                        <div className="flex items-center gap-1.5">
+                          {pu.sku && (
+                            <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-teal-50 dark:bg-teal-950/60 text-teal-800 dark:text-teal-300 border border-teal-200 dark:border-teal-800">
+                              {pu.sku}
+                            </span>
+                          )}
+                          <span className="font-bold text-slate-900 dark:text-white">{pu.Part_Name}</span>
+                        </div>
+                        <span className="text-slate-400 font-mono text-[11px] mt-0.5 block">
+                          Qty: {pu.Quantity} {pu.unit || 'piece'} × ₹{pu.Unit_Price_At_Time}
+                        </span>
                       </div>
                       <div className="flex items-center gap-3">
-                        <span className="font-mono font-bold">₹{pu.Total_Price.toFixed(2)}</span>
+                        <span className="font-mono font-bold text-slate-900 dark:text-white">₹{pu.Total_Price.toFixed(2)}</span>
                         {selectedJob.Status !== 'Completed' && (
                           <button
                             type="button"
@@ -466,47 +510,131 @@ export function MechanicDashboard() {
               )}
 
               {/* Add Part Form */}
-              {selectedJob.Status !== 'Completed' && (
-                <form onSubmit={handleAddPart} className="p-3.5 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-850 space-y-3">
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <div className="sm:col-span-2">
-                      <Select
-                        label="Add Spare Part"
-                        value={partId}
-                        onChange={(e) => setPartId(e.target.value)}
-                        options={[
-                          { value: '', label: '-- Select OEM Spare Part --' },
-                          ...spareParts.map(p => ({
-                            value: String(p.Part_ID),
-                            label: `${p.Name} (₹${p.Price} | ${p.Quantity_In_Stock} in stock)`
-                          }))
-                        ]}
-                      />
+              {selectedJob.Status !== 'Completed' && (() => {
+                const chosenPartObj = spareParts.find(p => String(p.Part_ID || p.id) === String(partId));
+                const searchFilter = (part) => {
+                  if (!partSearch.trim()) return true;
+                  const q = partSearch.trim().toLowerCase();
+                  return (part.Name || part.name || '').toLowerCase().includes(q) ||
+                         (part.sku || part.SKU || '').toLowerCase().includes(q);
+                };
+
+                const suggestedList = (jobPartsOptions?.suggested_parts || []).filter(searchFilter);
+                const categoryGroups = jobPartsOptions?.categories || {};
+
+                return (
+                  <form onSubmit={handleAddPart} className="p-3.5 rounded-2xl border border-dashed border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-850 space-y-3">
+                    <div className="space-y-2">
+                      {/* Search filter for picker */}
+                      <div className="relative">
+                        <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="text"
+                          placeholder="Filter catalog by SKU or component name..."
+                          value={partSearch}
+                          onChange={e => setPartSearch(e.target.value)}
+                          className="w-full pl-9 pr-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl text-xs focus:outline-none focus:ring-1 focus:ring-teal-700 text-slate-900 dark:text-white"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <div className="sm:col-span-2">
+                          <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider block mb-1">
+                            Select Spare Part
+                          </label>
+                          <select
+                            value={partId}
+                            onChange={(e) => {
+                              setPartId(e.target.value);
+                              setPartQty(1);
+                            }}
+                            className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-700 font-medium"
+                          >
+                            <option value="">-- Choose Spare Part --</option>
+                            {/* Suggested for this job */}
+                            {suggestedList.length > 0 && (
+                              <optgroup label="✨ Suggested For This Job">
+                                {suggestedList.map(p => {
+                                  const q = p.Quantity_In_Stock ?? p.quantity ?? 0;
+                                  const isOut = q === 0;
+                                  return (
+                                    <option
+                                      key={`sug-${p.Part_ID || p.id}`}
+                                      value={String(p.Part_ID || p.id)}
+                                      disabled={isOut}
+                                    >
+                                      {isOut ? '[Out of stock] ' : '⭐ '}
+                                      {p.sku ? `[${p.sku}] ` : ''}{p.Name || p.name} — ₹{p.Price} / {p.unit || 'piece'} ({q} in stock)
+                                    </option>
+                                  );
+                                })}
+                              </optgroup>
+                            )}
+
+                            {/* Grouped by category */}
+                            {Object.entries(categoryGroups).map(([catName, catParts]) => {
+                              const filteredCatParts = catParts.filter(searchFilter);
+                              if (filteredCatParts.length === 0) return null;
+                              return (
+                                <optgroup key={catName} label={`📂 ${catName}`}>
+                                  {filteredCatParts.map(p => {
+                                    const q = p.Quantity_In_Stock ?? p.quantity ?? 0;
+                                    const isOut = q === 0;
+                                    return (
+                                      <option
+                                        key={p.Part_ID || p.id}
+                                        value={String(p.Part_ID || p.id)}
+                                        disabled={isOut}
+                                      >
+                                        {isOut ? '[Out of stock] ' : ''}
+                                        {p.sku ? `[${p.sku}] ` : ''}{p.Name || p.name} — ₹{p.Price} / {p.unit || 'piece'} ({q} in stock)
+                                      </option>
+                                    );
+                                  })}
+                                </optgroup>
+                              );
+                            })}
+                          </select>
+                        </div>
+                        <div>
+                          <Input
+                            label="Quantity"
+                            type="number"
+                            min="1"
+                            max={chosenPartObj ? (chosenPartObj.Quantity_In_Stock ?? chosenPartObj.quantity ?? 1) : 20}
+                            value={partQty}
+                            onChange={(e) => setPartQty(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      {chosenPartObj && (
+                        <div className="flex items-center justify-between text-[11px] text-slate-500 bg-slate-100 dark:bg-slate-800 p-2 rounded-xl font-mono">
+                          <span>
+                            Available Stock: <strong className={(chosenPartObj.Quantity_In_Stock ?? chosenPartObj.quantity ?? 0) === 0 ? 'text-red-500' : 'text-emerald-600'}>
+                              {chosenPartObj.Quantity_In_Stock ?? chosenPartObj.quantity ?? 0} {chosenPartObj.unit || 'units'}
+                            </strong>
+                          </span>
+                          <span>Unit Price: <strong>₹{chosenPartObj.Price ?? chosenPartObj.price} / {chosenPartObj.unit || 'piece'}</strong></span>
+                        </div>
+                      )}
                     </div>
-                    <div>
-                      <Input
-                        label="Quantity"
-                        type="number"
-                        min="1"
-                        max="20"
-                        value={partQty}
-                        onChange={(e) => setPartQty(e.target.value)}
-                      />
+
+                    <div className="flex justify-end pt-1">
+                      <Button
+                        type="submit"
+                        variant="primary"
+                        size="sm"
+                        isLoading={addingPart}
+                        icon={Plus}
+                        className="bg-[#065F5B] text-white"
+                      >
+                        Deduct & Log Part
+                      </Button>
                     </div>
-                  </div>
-                  <div className="flex justify-end">
-                    <Button
-                      type="submit"
-                      variant="primary"
-                      size="sm"
-                      isLoading={addingPart}
-                      icon={Plus}
-                    >
-                      Deduct & Log Part
-                    </Button>
-                  </div>
-                </form>
-              )}
+                  </form>
+                );
+              })()}
             </div>
 
             {/* LABOUR HOURS & NOTES MANAGER */}

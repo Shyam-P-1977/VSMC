@@ -134,7 +134,9 @@ def create_booking(customer_id: int, vehicle_id: int, slot_id: int, service_ids:
         raise LookupError("Time slot does not exist")
 
     # If center_id is provided, verify match
-    effective_center_id = center_id or slot.center_id or 1
+    if not center_id and not slot.center_id:
+        raise ValueError("A valid service center must be specified for booking.")
+    effective_center_id = center_id or slot.center_id
     if slot.center_id and center_id and slot.center_id != center_id:
         raise ValueError("Selected slot belongs to a different service center")
 
@@ -212,7 +214,8 @@ def create_booking(customer_id: int, vehicle_id: int, slot_id: int, service_ids:
         notify_user(req.center.owner_user_id, f"New appointment request #{req.Request_ID} received for {slot.Date} {slot.Start_Time} ({urgency}).")
 
     if urgency == "Urgent":
-        notify_admins(f"URGENT BOOKING ALERT: Request #{req.Request_ID} at {center_name} marked Urgent!")
+        from services.notification_service import notify_center_admins
+        notify_center_admins(effective_center_id, f"URGENT BOOKING ALERT: Request #{req.Request_ID} at {center_name} marked Urgent!")
 
     db.session.commit()
     return req

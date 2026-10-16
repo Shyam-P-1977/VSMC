@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from extensions import db, role_required
 from models import Service_Center, User, Mechanic, Service_Request, Invoice
+from services.inventory_service import seed_default_parts
 
 platform_bp = Blueprint('platform', __name__, url_prefix='/api/platform')
 
@@ -51,6 +52,12 @@ def approve_center(center_id):
     center.approval_status = 'Approved'
     center.is_active = True
     db.session.commit()
+
+    try:
+        seed_default_parts(center.id)
+    except Exception as e:
+        print("[*] Parts seeding on center approval notice:", e)
+
     return jsonify({
         "message": f"Service center '{center.name}' has been Approved successfully.",
         "center": center.to_dict()

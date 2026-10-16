@@ -38,6 +38,8 @@ export const requestApi = {
     return res.data;
   },
   getAttachmentUrl: (requestId, attachmentId) => {
-    return `${apiClient.defaults.baseURL}/requests/${requestId}/attachments/${attachmentId}`;
+    const token = localStorage.getItem('token') || sessionStorage.getItem('token');
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+    return `${apiClient.defaults.baseURL}/requests/${requestId}/attachments/${attachmentId}${tokenParam}`;
   }
 };

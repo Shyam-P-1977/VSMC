@@ -63,6 +63,10 @@ def create_app(config_class=Config):
     def bad_request(e):
         return jsonify({"error": getattr(e, 'description', "Bad request"), "code": "BAD_REQUEST"}), 400
 
+    @app.errorhandler(403)
+    def forbidden(e):
+        return jsonify({"error": getattr(e, 'description', "Forbidden"), "code": "FORBIDDEN"}), 403
+
     @app.errorhandler(404)
     def not_found(e):
         return jsonify({"error": "Requested resource not found", "code": "NOT_FOUND"}), 404
@@ -78,6 +82,20 @@ def create_app(config_class=Config):
     with app.app_context():
         import models  # noqa: F401
         db.create_all()
+
+        # One-time backfill on app startup:
+        # For every existing center that has ZERO parts, seed default parts catalog
+        try:
+            from models import Service_Center, Spare_Part
+            from services.inventory_service import seed_default_parts
+            centers = Service_Center.query.all()
+            for c in centers:
+                part_count = Spare_Part.query.filter_by(center_id=c.id).count()
+                if part_count == 0:
+                    res = seed_default_parts(c.id)
+                    print(f"[*] Backfilled {res['added']} default spare parts for center #{c.id} ({c.name} - {c.center_code})")
+        except Exception as e:
+            print("[!] Startup inventory backfill error:", e)
 
     return app
 

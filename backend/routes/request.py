@@ -7,6 +7,7 @@ from models import Service_Request, Request_Attachment, Vehicle, User, Mechanic,
 from services.booking_service import (
     create_booking, cancel_booking, accept_booking, reject_booking, assign_mechanic_to_request
 )
+from services.tenancy import get_current_center_id, scoped_requests, get_or_404_in_center
 
 request_bp = Blueprint('request', __name__, url_prefix='/api')
 
@@ -18,28 +19,40 @@ def allowed_file(filename, mime_type):
     ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
     return ext in ALLOWED_EXTENSIONS and mime_type in ALLOWED_MIMES
 
-def check_request_access(service_request, user):
+def fetch_request_or_404(request_id, user):
     """
-    Center isolation check:
-    - platform_admin: full access
-    - center / admin: ONLY if user.center_id == service_request.center_id
-    - customer: ONLY if user.User_ID == service_request.Customer_ID
-    - mechanic: ONLY if assigned and same center
+    Fetches a Service_Request enforcing multi-tenant isolation.
+    Returns (req, error_response, status_code).
+    For cross-center access attempts by center/mechanic, returns 404 (not 403)
+    to prevent probing existence of other centers' IDs.
     """
     if user.Role == 'platform_admin':
-        return True
-    if user.Role in ['admin', 'center']:
-        if user.center_id and service_request.center_id and user.center_id == service_request.center_id:
-            return True
-        # If user has no center_id set but is center role, check if they own the center
-        if user.center_id is None and service_request.center:
-            return service_request.center.owner_user_id == user.User_ID
-        return False
-    if user.Role == 'customer' and service_request.Customer_ID == user.User_ID:
-        return True
-    if user.Role == 'mechanic' and user.mechanic_profile:
-        return service_request.Mechanic_ID == user.mechanic_profile.Mechanic_ID
-    return False
+        req = db.session.get(Service_Request, request_id)
+        if not req:
+            return None, jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
+        return req, None, 200
+
+    if user.Role in ['admin', 'center', 'mechanic']:
+        center_id = get_current_center_id(user)
+        try:
+            req = get_or_404_in_center(Service_Request, request_id, center_id)
+        except Exception:
+            return None, jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
+
+        if user.Role == 'mechanic':
+            mech_profile = getattr(user, 'mechanic_profile', None)
+            if not mech_profile or req.Mechanic_ID != mech_profile.Mechanic_ID:
+                return None, jsonify({"error": "Forbidden: You are not assigned to this job", "code": "FORBIDDEN"}), 403
+
+        return req, None, 200
+
+    if user.Role == 'customer':
+        req = db.session.get(Service_Request, request_id)
+        if not req or req.Customer_ID != user.User_ID:
+            return None, jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
+        return req, None, 200
+
+    return None, jsonify({"error": "Forbidden", "code": "FORBIDDEN"}), 403
 
 
 # ========================================================
@@ -74,9 +87,14 @@ def book_request():
     if not slot:
         return jsonify({"error": "Time slot not found", "code": "NOT_FOUND"}), 404
 
-    effective_center_id = center_id or slot.center_id or 1
+    if not center_id and not slot.center_id:
+        return jsonify({"error": "Service center is required for booking", "code": "VALIDATION_ERROR"}), 400
+    effective_center_id = center_id or slot.center_id
+    if slot.center_id and center_id and slot.center_id != center_id:
+        return jsonify({"error": "Selected slot belongs to a different service center", "code": "VALIDATION_ERROR"}), 400
+
     center = db.session.get(Service_Center, effective_center_id)
-    if center and (center.approval_status != 'Approved' or not center.is_active):
+    if not center or (center.approval_status != 'Approved' or not center.is_active):
         return jsonify({"error": "Selected service center is not available", "code": "CENTER_UNAVAILABLE"}), 400
 
     try:
@@ -110,23 +128,17 @@ def list_requests():
     urgency_filter = request.args.get('urgency')
     center_id_param = request.args.get('center_id', type=int)
 
-    query = Service_Request.query
-
     if user.Role == 'customer':
-        query = query.filter_by(Customer_ID=user.User_ID)
-    elif user.Role == 'mechanic':
-        if not user.mechanic_profile:
-            return jsonify({"requests": []}), 200
-        query = query.filter_by(Mechanic_ID=user.mechanic_profile.Mechanic_ID)
-    elif user.Role in ['admin', 'center']:
-        target_center = user.center_id
-        if not target_center and user.owned_center:
-            target_center = user.owned_center.id
-        if target_center:
-            query = query.filter_by(center_id=target_center)
+        query = Service_Request.query.filter_by(Customer_ID=user.User_ID)
+    elif user.Role in ['admin', 'center', 'mechanic']:
+        query = scoped_requests(user=user)
     elif user.Role == 'platform_admin':
         if center_id_param:
-            query = query.filter_by(center_id=center_id_param)
+            query = Service_Request.query.filter_by(center_id=center_id_param)
+        else:
+            query = Service_Request.query
+    else:
+        return jsonify({"requests": []}), 200
 
     if status_filter:
         query = query.filter(Service_Request.Status == status_filter)
@@ -148,12 +160,9 @@ def list_requests():
 @token_required
 def get_request_detail(request_id):
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not check_request_access(req, user):
-        return jsonify({"error": "Access forbidden: You cannot view this request", "code": "FORBIDDEN"}), 403
+    req, err, status = fetch_request_or_404(request_id, user)
+    if err:
+        return err, status
 
     return jsonify({"request": req.to_dict(full=True)}), 200
 
@@ -161,12 +170,9 @@ def get_request_detail(request_id):
 @token_required
 def cancel_request_route(request_id):
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not check_request_access(req, user):
-        return jsonify({"error": "Forbidden: Cannot cancel this booking", "code": "FORBIDDEN"}), 403
+    req, err, status = fetch_request_or_404(request_id, user)
+    if err:
+        return err, status
 
     data = request.get_json() or {}
     note = data.get('reason', 'Cancelled by user')
@@ -191,16 +197,12 @@ def get_center_requests():
     user = request.current_user
     status_filter = request.args.get('status')
     
-    target_center = user.center_id
-    if not target_center and user.owned_center:
-        target_center = user.owned_center.id
-
-    if not target_center and user.Role != 'platform_admin':
-        return jsonify({"error": "No service center associated with this user", "code": "CENTER_NOT_FOUND"}), 400
-
-    query = Service_Request.query
-    if target_center:
-        query = query.filter_by(center_id=target_center)
+    if user.Role == 'platform_admin':
+        target_center = request.args.get('center_id', type=int)
+        query = Service_Request.query.filter_by(center_id=target_center) if target_center else Service_Request.query
+    else:
+        center_id = get_current_center_id(user)
+        query = scoped_requests(center_id=center_id, user=user)
 
     if status_filter:
         query = query.filter(Service_Request.Status == status_filter)
@@ -216,12 +218,9 @@ def get_center_requests():
 @role_required('admin', 'center', 'platform_admin')
 def accept_request_route(request_id):
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not check_request_access(req, user):
-        return jsonify({"error": "Forbidden: This request belongs to another service center", "code": "FORBIDDEN"}), 403
+    req, err, status = fetch_request_or_404(request_id, user)
+    if err:
+        return err, status
 
     try:
         updated = accept_booking(request_id, user.User_ID)
@@ -236,12 +235,9 @@ def accept_request_route(request_id):
 @role_required('admin', 'center', 'platform_admin')
 def reject_request_route(request_id):
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not check_request_access(req, user):
-        return jsonify({"error": "Forbidden: This request belongs to another service center", "code": "FORBIDDEN"}), 403
+    req, err, status = fetch_request_or_404(request_id, user)
+    if err:
+        return err, status
 
     data = request.get_json() or {}
     reason = data.get('reason', '').strip()
@@ -269,12 +265,9 @@ def reject_request_route(request_id):
 @role_required('admin', 'center', 'platform_admin')
 def assign_mechanic_route(request_id):
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not check_request_access(req, user):
-        return jsonify({"error": "Forbidden: This request belongs to another service center", "code": "FORBIDDEN"}), 403
+    req, err, status = fetch_request_or_404(request_id, user)
+    if err:
+        return err, status
 
     data = request.get_json() or {}
     mechanic_id = data.get('mechanic_id')
@@ -301,12 +294,9 @@ def assign_mechanic_route(request_id):
 @token_required
 def upload_attachments(request_id):
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not check_request_access(req, user):
-        return jsonify({"error": "Forbidden: Cannot upload attachments to this request", "code": "FORBIDDEN"}), 403
+    req, err, status = fetch_request_or_404(request_id, user)
+    if err:
+        return err, status
 
     existing_count = Request_Attachment.query.filter_by(Request_ID=request_id).count()
     if existing_count >= 3:
@@ -364,12 +354,9 @@ def upload_attachments(request_id):
 @token_required
 def download_attachment(request_id, attachment_id):
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not check_request_access(req, user):
-        return jsonify({"error": "Forbidden: You cannot access this attachment", "code": "FORBIDDEN"}), 403
+    req, err, status = fetch_request_or_404(request_id, user)
+    if err:
+        return err, status
 
     att = db.session.get(Request_Attachment, attachment_id)
     if not att or att.Request_ID != request_id:

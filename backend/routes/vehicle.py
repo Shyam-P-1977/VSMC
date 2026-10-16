@@ -2,6 +2,7 @@ import re
 from flask import Blueprint, request, jsonify
 from extensions import db, token_required
 from models import Vehicle, Service_Request
+from services.tenancy import get_current_center_id
 
 vehicle_bp = Blueprint('vehicle', __name__, url_prefix='/api/vehicles')
 
@@ -16,13 +17,27 @@ def format_plate(plate: str) -> str:
 @token_required
 def list_vehicles():
     user = request.current_user
-    if user.Role == 'admin':
+    if user.Role == 'platform_admin':
         customer_id = request.args.get('customer_id')
         if customer_id:
             vehicles = Vehicle.query.filter_by(Customer_ID=customer_id).all()
         else:
             vehicles = Vehicle.query.all()
+    elif user.Role in ['admin', 'center', 'mechanic']:
+        center_id = get_current_center_id(user)
+        customer_id = request.args.get('customer_id')
+        
+        # Scoped to vehicles that have service requests at this center
+        q = Vehicle.query.join(
+            Service_Request, Service_Request.Vehicle_ID == Vehicle.Vehicle_ID
+        ).filter(Service_Request.center_id == center_id)
+
+        if customer_id:
+            q = q.filter(Vehicle.Customer_ID == customer_id)
+
+        vehicles = q.distinct().all()
     else:
+        # Customer sees their own vehicles
         vehicles = Vehicle.query.filter_by(Customer_ID=user.User_ID).all()
 
     return jsonify({"vehicles": [v.to_dict() for v in vehicles]}), 200
@@ -67,9 +82,8 @@ def add_vehicle():
             }), 200
         return jsonify({"error": f"Vehicle with registration '{reg_formatted}' is already registered in the system", "code": "DUPLICATE_REGISTRATION"}), 409
 
-    # Determine customer ID (admin can assign to specific customer, else logged-in customer)
     target_customer_id = user.User_ID
-    if user.Role == 'admin' and data.get('customer_id'):
+    if user.Role == 'platform_admin' and data.get('customer_id'):
         target_customer_id = data.get('customer_id')
 
     vehicle = Vehicle(
@@ -97,7 +111,7 @@ def update_vehicle(vehicle_id):
     if not vehicle:
         return jsonify({"error": "Vehicle not found", "code": "NOT_FOUND"}), 404
 
-    if user.Role != 'admin' and vehicle.Customer_ID != user.User_ID:
+    if user.Role != 'platform_admin' and vehicle.Customer_ID != user.User_ID:
         return jsonify({"error": "Forbidden: You do not own this vehicle", "code": "FORBIDDEN"}), 403
 
     data = request.get_json() or {}
@@ -137,10 +151,24 @@ def get_vehicle_history(vehicle_id):
     if not vehicle:
         return jsonify({"error": "Vehicle not found", "code": "NOT_FOUND"}), 404
 
-    if user.Role != 'admin' and vehicle.Customer_ID != user.User_ID:
-        return jsonify({"error": "Forbidden: You do not own this vehicle", "code": "FORBIDDEN"}), 403
+    if user.Role == 'platform_admin':
+        requests = Service_Request.query.filter_by(Vehicle_ID=vehicle_id).order_by(Service_Request.Created_At.desc()).all()
+    elif user.Role in ['admin', 'center', 'mechanic']:
+        center_id = get_current_center_id(user)
+        # Only jobs done AT THIS CENTER
+        requests = Service_Request.query.filter_by(
+            Vehicle_ID=vehicle_id, center_id=center_id
+        ).order_by(Service_Request.Created_At.desc()).all()
 
-    requests = Service_Request.query.filter_by(Vehicle_ID=vehicle_id).order_by(Service_Request.Created_At.desc()).all()
+        # If this vehicle has no jobs at this center, and caller is not the owner: 404!
+        if not requests and vehicle.Customer_ID != user.User_ID:
+            return jsonify({"error": "Vehicle not found in this service center", "code": "NOT_FOUND"}), 404
+    else:
+        # Customer
+        if vehicle.Customer_ID != user.User_ID:
+            return jsonify({"error": "Forbidden: You do not own this vehicle", "code": "FORBIDDEN"}), 403
+        requests = Service_Request.query.filter_by(Vehicle_ID=vehicle_id).order_by(Service_Request.Created_At.desc()).all()
+
     return jsonify({
         "vehicle": vehicle.to_dict(),
         "history": [req.to_dict() for req in requests]

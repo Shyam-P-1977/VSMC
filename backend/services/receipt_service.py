@@ -18,13 +18,26 @@ def build_receipt_dict(payment):
     comp_date = req.Completed_At if req and req.Completed_At else (payment.Created_At or datetime.utcnow())
     next_due = (comp_date + timedelta(days=180)).strftime("%d %b %Y")
 
-    # Itemized items
+    # Itemized items with SKU and unit mapping
+    parts_map = {}
+    if req and req.parts_used:
+        for pu in req.parts_used:
+            if pu.part:
+                parts_map[pu.part.Name] = {
+                    "sku": pu.part.sku,
+                    "unit": pu.part.unit
+                }
+
     items = []
     if invoice and invoice.line_items and len(invoice.line_items) > 0:
         for li in invoice.line_items:
+            part_info = parts_map.get(li.description) or {}
             items.append({
                 "type": li.item_type,
+                "item_type": li.item_type,
                 "description": li.description,
+                "sku": part_info.get("sku"),
+                "unit": part_info.get("unit", "piece" if li.item_type == "Part" else "hrs" if li.item_type == "Labour" else None),
                 "quantity": li.quantity,
                 "unit_price": li.unit_price,
                 "amount": li.amount
@@ -35,6 +48,7 @@ def build_receipt_dict(payment):
             for s in req.service_items:
                 items.append({
                     "type": "Service",
+                    "item_type": "Service",
                     "description": s.service.Name if s.service else "Service",
                     "quantity": 1.0,
                     "unit_price": s.Unit_Price_At_Time,
@@ -44,7 +58,10 @@ def build_receipt_dict(payment):
             for p in req.parts_used:
                 items.append({
                     "type": "Part",
+                    "item_type": "Part",
                     "description": p.part.Name if p.part else "Part",
+                    "sku": p.part.sku if p.part else None,
+                    "unit": p.part.unit if p.part else "piece",
                     "quantity": float(p.Quantity),
                     "unit_price": p.Unit_Price_At_Time,
                     "amount": round(p.Quantity * p.Unit_Price_At_Time, 2)

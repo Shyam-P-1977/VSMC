@@ -1,29 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 import {
-  Wrench, UserPlus, Phone, Mail, CheckCircle2, XCircle,
+  Wrench, Phone, Mail, CheckCircle2, XCircle,
   AlertTriangle, Edit2, Shield, Activity, Power
 } from 'lucide-react';
 import { DashboardLayout } from '../../app/layouts/DashboardLayout';
 import {
-  Card, Button, Badge, Modal, Input, Select, Skeleton
+  Card, Button, Badge, Modal, Select, Skeleton
 } from '../../shared/ui';
 import { adminApi } from '../../api';
 
 export function AdminMechanics() {
   const [mechanics, setMechanics] = useState([]);
   const [loading, setLoading] = useState(true);
-
-  // Add Mechanic Modal
-  const [addModalOpen, setAddModalOpen] = useState(false);
-  const [newMech, setNewMech] = useState({
-    Name: '',
-    Email: '',
-    Contact: '',
-    Password: '',
-    Specialization: 'General Diagnostics'
-  });
-  const [creating, setCreating] = useState(false);
 
   // Edit Mechanic Modal
   const [editModalOpen, setEditModalOpen] = useState(false);
@@ -49,40 +38,6 @@ export function AdminMechanics() {
   useEffect(() => {
     fetchMechanics();
   }, []);
-
-  const handleOpenAdd = () => {
-    setNewMech({
-      Name: '',
-      Email: '',
-      Contact: '',
-      Password: '',
-      Specialization: 'General Diagnostics'
-    });
-    setAddModalOpen(true);
-  };
-
-  const handleCreateSubmit = async (e) => {
-    e.preventDefault();
-    if (!newMech.Name || !newMech.Email || !newMech.Contact || !newMech.Password) {
-      toast.error('Please complete all required fields');
-      return;
-    }
-    if (newMech.Password.length < 8) {
-      toast.error('Password must be at least 8 characters');
-      return;
-    }
-    try {
-      setCreating(true);
-      await adminApi.createMechanic(newMech);
-      toast.success('Mechanic account created successfully');
-      setAddModalOpen(false);
-      fetchMechanics();
-    } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to create mechanic');
-    } finally {
-      setCreating(false);
-    }
-  };
 
   const handleOpenEdit = (mech) => {
     setEditMechId(mech.Mechanic_ID);
@@ -130,6 +85,8 @@ export function AdminMechanics() {
     }
   };
 
+  const availableCount = mechanics.filter(m => m.Is_Available).length;
+
   return (
     <DashboardLayout
       title="Workshop Mechanics & Technicians"
@@ -137,17 +94,20 @@ export function AdminMechanics() {
     >
       <div className="space-y-6">
         {/* Top Controls */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Badge variant="teal" className="text-sm px-3 py-1">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <Badge variant="teal" className="text-sm px-3.5 py-1.5 font-bold">
               {mechanics.length} Registered Technicians
+            </Badge>
+            <Badge variant="success" className="text-sm px-3.5 py-1.5 font-semibold">
+              {availableCount} Available for Dispatch
             </Badge>
           </div>
 
-          <Button variant="primary" onClick={handleOpenAdd}>
-            <UserPlus className="w-4 h-4 mr-2" />
-            Add New Technician
-          </Button>
+          <div className="text-xs text-neutral-500 dark:text-neutral-400 bg-neutral-100 dark:bg-neutral-800/60 px-4 py-2.5 rounded-2xl border border-neutral-200/60 dark:border-neutral-700/60 flex items-center gap-2">
+            <Shield className="w-4 h-4 text-teal-600 dark:text-signal-yellow shrink-0" />
+            <span>Technicians join this center during registration using your workshop's <strong>Center Code</strong>.</span>
+          </div>
         </div>
 
         {/* Mechanics Grid / Table */}
@@ -159,7 +119,7 @@ export function AdminMechanics() {
           <Card className="text-center py-12">
             <Wrench className="w-12 h-12 text-neutral-300 dark:text-neutral-700 mx-auto mb-3" />
             <h3 className="text-lg font-bold text-neutral-800 dark:text-white">No Technicians Registered</h3>
-            <p className="text-sm text-neutral-500 mt-1">Add workshop mechanics to begin assigning work orders.</p>
+            <p className="text-sm text-neutral-500 mt-1">Technicians who register using this workshop's center code will automatically appear in this roster.</p>
           </Card>
         ) : (
           <div className="bg-white dark:bg-neutral-900 rounded-3xl border border-neutral-200 dark:border-neutral-800 shadow-sm overflow-hidden">
@@ -178,22 +138,25 @@ export function AdminMechanics() {
                 </thead>
                 <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800 text-sm">
                   {mechanics.map(m => {
-                    const isActive = m.User?.Is_Active ?? true;
+                    const mechName = m.User?.Name || m.Name || m.name || `Technician #${m.Mechanic_ID}`;
+                    const mechEmail = m.User?.Email || m.Email || m.email || '';
+                    const mechContact = m.User?.Contact || m.Contact || m.phone || 'N/A';
+                    const isActive = m.User?.Is_Active ?? m.Is_Active ?? true;
                     const hasActiveJobs = (m.Active_Jobs_Count || 0) > 0;
 
                     return (
                       <tr key={m.Mechanic_ID} className="hover:bg-neutral-50/80 dark:hover:bg-neutral-800/40 transition-colors">
                         <td className="py-3.5 px-4">
                           <div className="font-bold text-neutral-900 dark:text-white flex items-center gap-2">
-                            {m.User?.Name}
+                            {mechName}
                             <span className="text-xs font-mono font-normal text-neutral-400">#M{m.Mechanic_ID}</span>
                           </div>
-                          <div className="text-xs text-neutral-500">{m.User?.Email}</div>
+                          <div className="text-xs text-neutral-500">{mechEmail}</div>
                         </td>
                         <td className="py-3.5 px-4 text-xs text-neutral-600 dark:text-neutral-400">
                           <div className="flex items-center gap-1.5">
                             <Phone className="w-3.5 h-3.5 text-teal-600" />
-                            {m.User?.Contact || 'N/A'}
+                            {mechContact}
                           </div>
                         </td>
                         <td className="py-3.5 px-4">
@@ -252,71 +215,7 @@ export function AdminMechanics() {
           </div>
         )}
 
-        {/* Add Mechanic Modal */}
-        <Modal
-          isOpen={addModalOpen}
-          onClose={() => setAddModalOpen(false)}
-          title="Register New Workshop Mechanic"
-        >
-          <form onSubmit={handleCreateSubmit} className="space-y-4">
-            <Input
-              label="Technician Full Name"
-              required
-              value={newMech.Name}
-              onChange={e => setNewMech({ ...newMech, Name: e.target.value })}
-              placeholder="e.g. Technician Name"
-            />
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <Input
-                label="Staff Email"
-                type="email"
-                required
-                value={newMech.Email}
-                onChange={e => setNewMech({ ...newMech, Email: e.target.value })}
-                placeholder="technician@example.com"
-              />
-              <Input
-                label="Contact Number (10 digits)"
-                required
-                value={newMech.Contact}
-                onChange={e => setNewMech({ ...newMech, Contact: e.target.value })}
-                placeholder="9876543210"
-              />
-            </div>
 
-            <Input
-              label="Temporary Password"
-              type="password"
-              required
-              value={newMech.Password}
-              onChange={e => setNewMech({ ...newMech, Password: e.target.value })}
-              placeholder="Minimum 8 characters"
-            />
-
-            <Select
-              label="Primary Specialization"
-              value={newMech.Specialization}
-              onChange={e => setNewMech({ ...newMech, Specialization: e.target.value })}
-              options={[
-                { value: 'Engine & Transmission Overhaul', label: 'Engine & Transmission Overhaul' },
-                { value: 'Braking & ABS Hydraulics', label: 'Braking & ABS Hydraulics' },
-                { value: 'Automotive Electrical & OBD Scan', label: 'Automotive Electrical & OBD Scan' },
-                { value: 'HVAC & Climate Control', label: 'HVAC & Climate Control' },
-                { value: 'Suspension & Wheel Alignment', label: 'Suspension & Wheel Alignment' },
-                { value: 'General Diagnostics', label: 'General Diagnostics' }
-              ]}
-            />
-
-            <div className="flex justify-end gap-3 pt-3 border-t border-neutral-200 dark:border-neutral-800">
-              <Button type="button" variant="ghost" onClick={() => setAddModalOpen(false)}>
-                Cancel
-              </Button>
-              <Button type="submit" variant="primary" loading={creating}>
-                Create Staff Account
-              </Button>
-            </div>
-          </form>
-        </Modal>
 
         {/* Edit Mechanic Modal */}
         <Modal

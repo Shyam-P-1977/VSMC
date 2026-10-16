@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Wrench, Car, Calendar, FileText, Settings, Shield, Bell, LogOut,
   Menu, X, Search, ChevronRight, User as UserIcon, CheckCheck, Inbox,
-  MapPin, Building2, Receipt
+  MapPin, Building2, Receipt, Users
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { ThemeToggle, CommandPalette, Badge } from '../../shared/ui';
@@ -63,6 +63,7 @@ export function DashboardLayout({ children, title, subtitle }) {
         { label: 'Services & Slots', path: '/admin/services', icon: Settings },
         { label: 'Spare Parts Stock', path: '/admin/inventory', icon: Inbox },
         { label: 'Invoices & Ledger', path: '/admin/invoices', icon: FileText },
+        { label: 'Customer Directory', path: '/admin/customers', icon: Users },
         { label: 'Performance Reports', path: '/admin/reports', icon: FileText },
       ];
     }

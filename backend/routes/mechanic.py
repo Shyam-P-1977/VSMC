@@ -1,10 +1,12 @@
 from datetime import datetime
 from flask import Blueprint, request, jsonify
 from extensions import db, token_required, role_required
-from models import Service_Request, Mechanic, User, Job_Labour, Status_History, Invoice
+from models import Service_Request, Mechanic, User, Job_Labour, Status_History, Invoice, Spare_Part
 from services.inventory_service import add_part_to_job, remove_part_from_job
 from services.billing_service import calculate_and_create_invoice
 from services.notification_service import notify_user
+from services.tenancy import get_current_center_id, get_or_404_in_center
+from data.service_parts_mapping import get_suggested_skus_for_services
 
 mechanic_bp = Blueprint('mechanic', __name__, url_prefix='/api')
 
@@ -14,56 +16,80 @@ LEGAL_TRANSITIONS = {
     'Awaiting Parts': ['In Progress', 'Completed']
 }
 
-def verify_mechanic_assignment(req, user):
+def verify_and_fetch_request(request_id, user):
     """
-    Ensures that if the user is a mechanic, they are assigned to this request
-    and belong to the same center. Admin/Center is allowed for their own center.
+    Safely retrieves a request with strict multi-tenant isolation:
+    - If user is platform_admin: fetches directly, or 404.
+    - If user is center/admin: fetches only if belongs to user's center (404 otherwise).
+    - If user is mechanic: fetches only if belongs to mechanic's center (404 otherwise),
+      and verifies mechanic is assigned to the request (403 otherwise).
+    Returns (req, error_response, status_code).
     """
-    if user.Role in ['admin', 'center', 'platform_admin']:
-        if user.Role == 'platform_admin':
-            return True
-        target_center = user.center_id or (user.owned_center.id if user.owned_center else None)
-        if target_center and req.center_id and target_center != req.center_id:
-            return False
-        return True
+    if user.Role == 'platform_admin':
+        req = db.session.get(Service_Request, request_id)
+        if not req:
+            return None, jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
+        return req, None, 200
+
+    center_id = get_current_center_id(user)
+    if not center_id:
+        return None, jsonify({"error": "Forbidden: No center association", "code": "FORBIDDEN"}), 403
+
+    try:
+        req = get_or_404_in_center(Service_Request, request_id, center_id)
+    except Exception:
+        return None, jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
+
     if user.Role == 'mechanic':
-        if not user.mechanic_profile or req.Mechanic_ID != user.mechanic_profile.Mechanic_ID:
-            return False
-        if req.center_id and user.mechanic_profile.center_id and req.center_id != user.mechanic_profile.center_id:
-            return False
-        return True
-    return False
+        mech_profile = getattr(user, 'mechanic_profile', None)
+        if not mech_profile or req.Mechanic_ID != mech_profile.Mechanic_ID:
+            return None, jsonify({"error": "Forbidden: You are not assigned to this job", "code": "FORBIDDEN"}), 403
+
+    return req, None, 200
+
 
 @mechanic_bp.route('/admin/mechanics/available', methods=['GET'])
 @role_required('admin', 'center', 'platform_admin')
 def get_available_mechanics():
     """
     Returns active mechanics who are available for job assignment,
-    scoped to the current user's center.
+    strictly scoped to the current user's center.
     """
     user = request.current_user
     query = Mechanic.query.join(User).filter(
         User.Is_Active == True,
-        Mechanic.Is_Active == True
+        Mechanic.Is_Available == True
     )
     if user.Role in ['admin', 'center']:
-        target_center = user.center_id or (user.owned_center.id if user.owned_center else None)
+        center_id = get_current_center_id(user)
+        query = query.filter(Mechanic.center_id == center_id)
+    elif user.Role == 'platform_admin':
+        target_center = request.args.get('center_id', type=int)
         if target_center:
             query = query.filter(Mechanic.center_id == target_center)
 
     mechanics = query.all()
     return jsonify({"mechanics": [m.to_dict() for m in mechanics]}), 200
 
+
 @mechanic_bp.route('/requests/<int:request_id>/assign', methods=['POST'])
 @role_required('admin', 'center', 'platform_admin')
 def assign_mechanic(request_id):
     """
     Center manager assigns an active, available mechanic to a service request.
-    Mechanic must belong to the same service center.
+    Strictly scoped to caller's center.
     """
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
+    user = request.current_user
+    if user.Role == 'platform_admin':
+        req = db.session.get(Service_Request, request_id)
+        if not req:
+            return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
+    else:
+        center_id = get_current_center_id(user)
+        try:
+            req = get_or_404_in_center(Service_Request, request_id, center_id)
+        except Exception:
+            return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
 
     if req.Status in ['Completed', 'Cancelled']:
         return jsonify({"error": f"Cannot assign mechanic to a {req.Status} request", "code": "INVALID_STATE"}), 400
@@ -73,7 +99,14 @@ def assign_mechanic(request_id):
     if not mechanic_id:
         return jsonify({"error": "Mechanic ID is required", "code": "VALIDATION_ERROR"}), 400
 
-    mechanic = db.session.get(Mechanic, mechanic_id)
+    if user.Role == 'platform_admin':
+        mechanic = db.session.get(Mechanic, mechanic_id)
+    else:
+        try:
+            mechanic = get_or_404_in_center(Mechanic, mechanic_id, center_id)
+        except Exception:
+            return jsonify({"error": "Mechanic not found", "code": "NOT_FOUND"}), 404
+
     if not mechanic:
         return jsonify({"error": "Mechanic not found", "code": "NOT_FOUND"}), 404
 
@@ -83,7 +116,7 @@ def assign_mechanic(request_id):
     # Cross-center check: mechanic must belong to the same center
     if req.center_id and mechanic.center_id and req.center_id != mechanic.center_id:
         return jsonify({
-            "error": f"Forbidden: Mechanic belongs to Center #{mechanic.center_id}, but request is for Center #{req.center_id}",
+            "error": "Forbidden: Mechanic belongs to another center",
             "code": "CROSS_CENTER_ASSIGNMENT_FORBIDDEN"
         }), 403
 
@@ -108,6 +141,7 @@ def assign_mechanic(request_id):
         "request": req.to_dict()
     }), 200
 
+
 @mechanic_bp.route('/requests/<int:request_id>/status', methods=['PUT'])
 @mechanic_bp.route('/mechanic/requests/<int:request_id>/status', methods=['PUT'])
 @token_required
@@ -116,12 +150,9 @@ def update_status(request_id):
     Mechanic updates the job status following strict legal state transitions.
     """
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not verify_mechanic_assignment(req, user):
-        return jsonify({"error": "Forbidden: You are not assigned to this job", "code": "FORBIDDEN"}), 403
+    req, err, status_code = verify_and_fetch_request(request_id, user)
+    if err:
+        return err, status_code
 
     data = request.get_json() or {}
     next_status = data.get('status')
@@ -153,17 +184,73 @@ def update_status(request_id):
         "request": req.to_dict()
     }), 200
 
+
+@mechanic_bp.route('/jobs/<int:request_id>/parts-options', methods=['GET'])
+@mechanic_bp.route('/requests/<int:request_id>/parts-options', methods=['GET'])
+@mechanic_bp.route('/mechanic/jobs/<int:request_id>/parts-options', methods=['GET'])
+@mechanic_bp.route('/mechanic/requests/<int:request_id>/parts-options', methods=['GET'])
+@token_required
+def get_job_parts_options(request_id):
+    """
+    Returns active parts for the request's center, grouped by category,
+    plus suggested parts based on the job's requested services.
+    Enforces center isolation.
+    """
+    user = request.current_user
+    req, err, status_code = verify_and_fetch_request(request_id, user)
+    if err:
+        return err, status_code
+
+    center_id = req.center_id
+    if not center_id:
+        return jsonify({"suggested_parts": [], "categories": {}, "parts": []}), 200
+
+    # Fetch active parts for this center only
+    parts = Spare_Part.query.filter_by(center_id=center_id, is_active=True).order_by(Spare_Part.Name.asc()).all()
+    parts_data = [p.to_dict() for p in parts]
+    parts_by_sku = {p.sku: p.to_dict() for p in parts if p.sku}
+
+    # Extract services from service items
+    service_names = []
+    if req.service_items:
+        for item in req.service_items:
+            if item.service and item.service.Name:
+                service_names.append(item.service.Name)
+            elif item.custom_service_name:
+                service_names.append(item.custom_service_name)
+
+    suggested_skus = get_suggested_skus_for_services(service_names)
+    suggested_parts = []
+    for sku in suggested_skus:
+        if sku in parts_by_sku:
+            suggested_parts.append(parts_by_sku[sku])
+
+    # Group parts by category
+    categories = {}
+    for p in parts_data:
+        cat = p.get('category') or 'General'
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(p)
+
+    return jsonify({
+        "request_id": request_id,
+        "center_id": center_id,
+        "services": service_names,
+        "suggested_parts": suggested_parts,
+        "categories": categories,
+        "parts": parts_data
+    }), 200
+
+
 @mechanic_bp.route('/requests/<int:request_id>/parts', methods=['POST'])
 @mechanic_bp.route('/mechanic/requests/<int:request_id>/parts', methods=['POST'])
 @token_required
 def log_part(request_id):
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not verify_mechanic_assignment(req, user):
-        return jsonify({"error": "Forbidden: You are not assigned to this job", "code": "FORBIDDEN"}), 403
+    req, err, status_code = verify_and_fetch_request(request_id, user)
+    if err:
+        return err, status_code
 
     data = request.get_json() or {}
     part_id = data.get('part_id')
@@ -176,22 +263,22 @@ def log_part(request_id):
             "part_used": job_part.to_dict(),
             "request": req.to_dict()
         }), 201
+    except PermissionError as e:
+        return jsonify({"error": str(e), "code": "FORBIDDEN"}), 403
     except ValueError as e:
         return jsonify({"error": str(e), "code": "INSUFFICIENT_STOCK"}), 400
     except LookupError as e:
         return jsonify({"error": str(e), "code": "NOT_FOUND"}), 404
+
 
 @mechanic_bp.route('/requests/<int:request_id>/parts/<int:part_used_id>', methods=['DELETE'])
 @mechanic_bp.route('/mechanic/requests/<int:request_id>/parts/<int:part_used_id>', methods=['DELETE'])
 @token_required
 def remove_part(request_id, part_used_id):
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not verify_mechanic_assignment(req, user):
-        return jsonify({"error": "Forbidden: You are not assigned to this job", "code": "FORBIDDEN"}), 403
+    req, err, status_code = verify_and_fetch_request(request_id, user)
+    if err:
+        return err, status_code
 
     try:
         remove_part_from_job(request_id, part_used_id)
@@ -202,17 +289,15 @@ def remove_part(request_id, part_used_id):
     except Exception as e:
         return jsonify({"error": str(e), "code": "ERROR"}), 400
 
+
 @mechanic_bp.route('/requests/<int:request_id>/labour', methods=['POST'])
 @mechanic_bp.route('/mechanic/requests/<int:request_id>/labour', methods=['POST'])
 @token_required
 def log_labour(request_id):
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not verify_mechanic_assignment(req, user):
-        return jsonify({"error": "Forbidden: You are not assigned to this job", "code": "FORBIDDEN"}), 403
+    req, err, status_code = verify_and_fetch_request(request_id, user)
+    if err:
+        return err, status_code
 
     if req.Status in ['Completed', 'Cancelled']:
         return jsonify({"error": f"Cannot modify labour for a {req.Status} request", "code": "INVALID_STATE"}), 400
@@ -242,6 +327,7 @@ def log_labour(request_id):
         "request": req.to_dict()
     }), 201
 
+
 @mechanic_bp.route('/requests/<int:request_id>/complete', methods=['POST'])
 @mechanic_bp.route('/mechanic/requests/<int:request_id>/complete', methods=['POST'])
 @token_required
@@ -254,12 +340,9 @@ def complete_job(request_id):
     Frees mechanic, generates itemized invoice, transitions to Completed.
     """
     user = request.current_user
-    req = db.session.get(Service_Request, request_id)
-    if not req:
-        return jsonify({"error": "Service request not found", "code": "NOT_FOUND"}), 404
-
-    if not verify_mechanic_assignment(req, user):
-        return jsonify({"error": "Forbidden: You are not assigned to this job", "code": "FORBIDDEN"}), 403
+    req, err, status_code = verify_and_fetch_request(request_id, user)
+    if err:
+        return err, status_code
 
     if req.Status == 'Completed':
         return jsonify({"error": "Job is already completed", "code": "ALREADY_COMPLETED"}), 400

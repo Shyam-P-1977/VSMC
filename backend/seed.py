@@ -8,6 +8,7 @@ from models import (
     Spare_Part, Job_Part_Used, Job_Labour, Invoice, Invoice_Line_Item,
     Payment, Customer_Feedback, Notification, Contact_Message
 )
+from services.inventory_service import seed_default_parts
 
 def ensure_center_slots(center_id, start_date=None, days_ahead=14):
     if not start_date:
@@ -385,23 +386,17 @@ def seed_all():
                         m_user.mechanic_profile.experience_years = exp
                         m_user.mechanic_profile.rating = m_rating
 
-            # Ensure inventory parts for center
-            for pname, pprice, pqty, pthresh in common_parts_templates:
-                part = Spare_Part.query.filter_by(center_id=center.id, Name=pname).first()
-                if not part:
-                    part = Spare_Part(
-                        center_id=center.id,
-                        Name=pname,
-                        Price=pprice,
-                        Quantity_In_Stock=pqty,
-                        Min_Threshold=pthresh
-                    )
-                    db.session.add(part)
+            # Ensure catalog spare parts for center
+            seed_default_parts(center.id)
 
             # Ensure slots for the center for 14 days
             ensure_center_slots(center.id, days_ahead=14)
             created_centers.append(center)
             print(f"  + Seeded Service Center #{center.id}: {center.name} ({center.city})")
+
+        # Ensure default catalog spare parts for all registered service centers
+        for sc in Service_Center.query.all():
+            seed_default_parts(sc.id)
 
         # 3. Simulate one center having a full slot for tomorrow to demo alternate suggestions
         tomorrow_str = (date.today() + timedelta(days=1)).isoformat()

@@ -20,6 +20,7 @@ export function AdminDashboard() {
   const [urgentPending, setUrgentPending] = useState([]);
   const [recentBookings, setRecentBookings] = useState([]);
   const [availableMechanics, setAvailableMechanics] = useState([]);
+  const [lowStockParts, setLowStockParts] = useState([]);
   const [center, setCenter] = useState(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -35,13 +36,14 @@ export function AdminDashboard() {
       setLoading(true);
       const [dashRes, mechRes, centerRes] = await Promise.all([
         adminApi.getDashboardKpis(),
-        mechanicApi.getAvailable(),
+        mechanicApi.getAvailable().catch(() => ({ mechanics: [] })),
         centerApi.getCenterProfile().catch(() => null)
       ]);
       setKpis(dashRes.kpis);
       setUrgentPending(dashRes.urgent_pending || []);
       setRecentBookings(dashRes.recent_bookings || []);
       setAvailableMechanics(mechRes.mechanics || []);
+      setLowStockParts(dashRes.low_stock_parts || []);
       setCenter(dashRes.center || centerRes?.center || null);
     } catch {
       toast.error('Failed to load admin metrics');
@@ -186,11 +188,11 @@ export function AdminDashboard() {
               color="teal"
             />
             <StatCard
-              title="Low Stock Parts"
-              value={kpis?.low_stock_count || 0}
-              subtitle="Below threshold alert"
+              title="Inventory Alerts"
+              value={`${kpis?.out_of_stock_count || 0} Out • ${kpis?.low_stock_count || 0} Low`}
+              subtitle="Parts needing restock"
               icon={AlertTriangle}
-              color={kpis?.low_stock_count > 0 ? "rose" : "teal"}
+              color={(kpis?.out_of_stock_count > 0 || kpis?.low_stock_count > 0) ? "rose" : "teal"}
             />
           </div>
         )}
@@ -277,23 +279,155 @@ export function AdminDashboard() {
             <Card className="p-6 bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 rounded-3xl shadow-soft">
               <div className="h-60 w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                    <XAxis dataKey="name" tick={{ fontSize: 11 }} />
+                  <BarChart data={chartData} margin={{ top: 15, right: 10, left: -20, bottom: 0 }}>
+                    <XAxis dataKey="name" tick={{ fontSize: 11, fontWeight: 600 }} />
                     <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
-                    <Tooltip />
-                    <Bar dataKey="count" radius={[8, 8, 0, 0]} />
+                    <Tooltip
+                      cursor={{ fill: 'rgba(0, 0, 0, 0.04)' }}
+                      content={({ active, payload }) => {
+                        if (active && payload && payload.length) {
+                          const item = payload[0].payload;
+                          return (
+                            <div className="bg-white dark:bg-slate-800 p-2.5 rounded-xl shadow-lg border border-slate-200 dark:border-slate-700 text-xs">
+                              <p className="font-bold text-slate-800 dark:text-white flex items-center gap-1.5">
+                                <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: item.fill }} />
+                                {item.name}
+                              </p>
+                              <p className="text-slate-600 dark:text-slate-300 font-mono mt-0.5">
+                                Orders: <span className="font-bold text-slate-900 dark:text-white">{item.count}</span>
+                              </p>
+                            </div>
+                          );
+                        }
+                        return null;
+                      }}
+                    />
+                    <Bar dataKey="count" radius={[8, 8, 0, 0]}>
+                      {chartData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.fill} />
+                      ))}
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </div>
 
               <div className="pt-4 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs text-slate-500">
-                <span>Available Active Mechanics:</span>
-                <span className="font-bold text-emerald-600 dark:text-emerald-400 font-mono">
-                  {availableMechanics.length} Available
-                </span>
+                <div className="flex items-center gap-3">
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
+                    Pending: <strong>{kpis?.pending_requests || 0}</strong>
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-teal-700 inline-block" />
+                    Active: <strong>{kpis?.active_jobs || 0}</strong>
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
+                    Completed: <strong>{kpis?.completed_jobs || 0}</strong>
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span>Available:</span>
+                  <span className="font-bold text-emerald-600 dark:text-emerald-400 font-mono">
+                    {availableMechanics.length}
+                  </span>
+                </div>
               </div>
             </Card>
           </div>
+        </div>
+
+        {/* Low Stock Alerts Card (Out of Stock First, Then Low Stock) */}
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-xl font-display uppercase tracking-wide font-black text-slate-900 dark:text-white flex items-center gap-2">
+                <span>Low Stock Inventory Alerts</span>
+                {lowStockParts.length > 0 && (
+                  <Badge variant="warning" size="sm">{lowStockParts.length} ACTION REQUIRED</Badge>
+                )}
+              </h3>
+              <p className="text-xs text-slate-500">
+                Critical warehouse shortages (out-of-stock shown first, followed by low-threshold components)
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate('/admin/inventory?filter=low')}
+              className="text-xs"
+            >
+              <span>Manage All Parts</span>
+              <ArrowRight className="w-3.5 h-3.5 ml-1.5" />
+            </Button>
+          </div>
+
+          {lowStockParts.length === 0 ? (
+            <Card className="p-6 text-center bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 rounded-3xl">
+              <CheckCircle2 className="w-8 h-8 text-emerald-500 mx-auto mb-2" />
+              <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200">
+                All inventory levels healthy
+              </h4>
+              <p className="text-xs text-slate-400 mt-1">
+                Every spare part in your workshop is currently above its minimum safety threshold.
+              </p>
+            </Card>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {lowStockParts.map(part => {
+                const qty = part.Quantity_In_Stock ?? part.quantity ?? 0;
+                const minThresh = part.Min_Threshold ?? part.min_threshold ?? 5;
+                const isOut = qty === 0;
+
+                return (
+                  <Card
+                    key={part.Part_ID || part.id}
+                    className={`p-4 border transition-all rounded-2xl flex flex-col justify-between ${
+                      isOut
+                        ? 'border-rose-300 dark:border-rose-900/60 bg-rose-50/20 dark:bg-rose-950/10'
+                        : 'border-amber-300 dark:border-amber-900/60 bg-amber-50/20 dark:bg-amber-950/10'
+                    }`}
+                  >
+                    <div>
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="font-mono text-[10px] font-bold px-2 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300 border border-neutral-200 dark:border-neutral-700">
+                          {part.sku || part.SKU || `ID-${part.Part_ID || part.id}`}
+                        </span>
+                        {isOut ? (
+                          <Badge variant="danger" size="sm">Out of Stock</Badge>
+                        ) : (
+                          <Badge variant="warning" size="sm">Low Stock</Badge>
+                        )}
+                      </div>
+
+                      <h4 className="font-bold text-sm text-neutral-900 dark:text-white mt-2.5 line-clamp-1">
+                        {part.Name || part.name}
+                      </h4>
+                      <p className="text-xs text-neutral-500 line-clamp-1">{part.category || 'General'}</p>
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-neutral-200/60 dark:border-neutral-800 flex items-center justify-between">
+                      <div className="text-xs">
+                        <span className="text-neutral-500">Qty: </span>
+                        <strong className={isOut ? 'text-rose-600' : 'text-amber-600 font-mono'}>
+                          {qty} {part.unit || 'units'}
+                        </strong>
+                        <span className="text-neutral-400 text-[11px] block">Min: {minThresh}</span>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        onClick={() => navigate(`/admin/inventory?search=${encodeURIComponent(part.sku || part.Name || '')}`)}
+                        className="text-xs py-1 px-3 h-auto bg-[#065F5B] text-white shadow-sm hover:bg-[#087772]"
+                      >
+                        Restock
+                      </Button>
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Recent Work Orders Table */}

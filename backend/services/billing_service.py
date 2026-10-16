@@ -68,10 +68,12 @@ def calculate_and_create_invoice(request_id: int, discount: float = 0.0) -> Invo
     if service_request.parts_used:
         for pu in service_request.parts_used:
             p_name = pu.part.Name if pu.part else "Spare Part"
+            sku = pu.part.sku if pu.part and pu.part.sku else None
+            desc = f"{p_name} ({sku})" if sku else p_name
             db.session.add(Invoice_Line_Item(
                 invoice_id=invoice.Invoice_ID,
                 item_type="Part",
-                description=p_name,
+                description=desc,
                 quantity=float(pu.Quantity),
                 unit_price=float(pu.Unit_Price_At_Time),
                 amount=round(pu.Quantity * pu.Unit_Price_At_Time, 2)

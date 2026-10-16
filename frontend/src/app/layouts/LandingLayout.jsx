@@ -47,12 +47,6 @@ export function LandingLayout({ children }) {
             <a href="#how-it-works" className="text-sm font-semibold text-slate-700 dark:text-slate-200 hover:text-teal-700 dark:hover:text-yellow-signal transition">
               How It Works
             </a>
-            <a href="#testimonials" className="text-sm font-semibold text-slate-700 dark:text-slate-200 hover:text-teal-700 dark:hover:text-yellow-signal transition">
-              Testimonials
-            </a>
-            <a href="#contact" className="text-sm font-semibold text-slate-700 dark:text-slate-200 hover:text-teal-700 dark:hover:text-yellow-signal transition">
-              Contact
-            </a>
           </nav>
 
           {/* Action CTAs */}
@@ -128,20 +122,6 @@ export function LandingLayout({ children }) {
               className="text-base font-semibold py-1 text-slate-800 dark:text-white"
             >
               How It Works
-            </a>
-            <a
-              href="#testimonials"
-              onClick={() => setMobileMenuOpen(false)}
-              className="text-base font-semibold py-1 text-slate-800 dark:text-white"
-            >
-              Testimonials
-            </a>
-            <a
-              href="#contact"
-              onClick={() => setMobileMenuOpen(false)}
-              className="text-base font-semibold py-1 text-slate-800 dark:text-white"
-            >
-              Contact
             </a>
 
             <div className="pt-4 border-t border-slate-100 dark:border-slate-700 flex flex-col gap-3">
@@ -263,15 +243,15 @@ export function LandingLayout({ children }) {
               </div>
             </div>
 
-            {/* Hub Location */}
+            {/* Doorstep Service */}
             <div className="flex flex-col gap-3">
               <h4 className="text-xs font-bold uppercase tracking-widest text-white">
-                Workshop Location
+                Doorstep Delivery
               </h4>
               <div className="flex items-start gap-2 text-xs text-slate-400">
                 <MapPin className="w-4 h-4 text-yellow-signal shrink-0 mt-0.5" />
                 <p>
-                  Plot 42, Auto Hub Way, Tech Industrial Park, Hinjawadi Phase 2, Pune, Maharashtra 411057
+                  Convenient doorstep vehicle pick-up and contactless return delivery available across all service bookings.
                 </p>
               </div>
               <div className="pt-2">

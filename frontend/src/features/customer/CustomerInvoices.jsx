@@ -310,8 +310,8 @@ export function CustomerInvoices() {
               <table className="w-full text-xs text-left border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
                 <thead className="bg-slate-100 dark:bg-slate-800 font-semibold text-slate-600 dark:text-slate-300">
                   <tr>
-                    <th className="p-2.5">Part Name</th>
-                    <th className="p-2.5 text-center">Qty</th>
+                    <th className="p-2.5">Part / SKU</th>
+                    <th className="p-2.5 text-center">Qty / Unit</th>
                     <th className="p-2.5 text-center">Unit Price</th>
                     <th className="p-2.5 text-right">Total</th>
                   </tr>
@@ -322,8 +322,17 @@ export function CustomerInvoices() {
                   ) : (
                     selectedInvoice.Parts_Used?.map((p) => (
                       <tr key={p.ID}>
-                        <td className="p-2.5 font-medium">{p.Part_Name}</td>
-                        <td className="p-2.5 text-center font-mono">{p.Quantity}</td>
+                        <td className="p-2.5 font-medium">
+                          <div>{p.Part_Name}</div>
+                          {p.sku && (
+                            <span className="inline-block text-[10px] font-mono text-teal-700 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-1.5 py-0.5 rounded border border-teal-200 dark:border-teal-800">
+                              {p.sku}
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-2.5 text-center font-mono">
+                          {p.Quantity} {p.unit || 'piece'}
+                        </td>
                         <td className="p-2.5 text-center font-mono">₹{p.Unit_Price_At_Time.toFixed(2)}</td>
                         <td className="p-2.5 text-right font-mono font-bold">₹{p.Total_Price.toFixed(2)}</td>
                       </tr>

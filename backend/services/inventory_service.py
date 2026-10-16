@@ -22,6 +22,10 @@ def add_part_to_job(request_id: int, part_id: int, quantity: int, changed_by_use
     if not part:
         raise LookupError("Spare part not found")
 
+    # Center isolation check
+    if service_request.center_id and part.center_id and service_request.center_id != part.center_id:
+        raise PermissionError(f"Part belongs to Center #{part.center_id}, but request is for Center #{service_request.center_id}")
+
     # Check sufficient stock
     if part.Quantity_In_Stock < quantity:
         # Insufficient stock: Transition request to 'Awaiting Parts'
@@ -76,3 +80,82 @@ def remove_part_from_job(request_id: int, job_part_id: int):
     db.session.delete(job_part)
     db.session.commit()
     return True
+
+def seed_default_parts(center_id: int):
+    """
+    Seeds the 44 default spare parts catalog for a service center.
+    Idempotent:
+      - Skips if a part with the same SKU already exists for this center.
+      - Also skips if a part with the same Name already exists for this center.
+      - Never overwrites existing stock or price.
+      - Does not emit notifications during seeding.
+    Returns:
+      dict: {"added": int, "skipped": int}
+    """
+    from data.default_parts import DEFAULT_SPARE_PARTS
+
+    existing_parts = Spare_Part.query.filter_by(center_id=center_id).all()
+    existing_skus = {p.sku for p in existing_parts if p.sku}
+    existing_names = {p.Name.strip().lower() for p in existing_parts if p.Name}
+
+    added = 0
+    skipped = 0
+
+    for item in DEFAULT_SPARE_PARTS:
+        sku = item["sku"]
+        name_lower = item["name"].strip().lower()
+
+        if sku in existing_skus or name_lower in existing_names:
+            skipped += 1
+            continue
+
+        new_part = Spare_Part(
+            center_id=center_id,
+            sku=sku,
+            Name=item["name"],
+            category=item.get("category", "General"),
+            unit=item.get("unit", "piece"),
+            Price=float(item["price"]),
+            Quantity_In_Stock=int(item["initial_qty"]),
+            Min_Threshold=int(item["min_threshold"]),
+            is_active=True
+        )
+        db.session.add(new_part)
+        existing_skus.add(sku)
+        existing_names.add(name_lower)
+        added += 1
+
+    if added > 0:
+        db.session.commit()
+
+    return {"added": added, "skipped": skipped}
+
+def record_stock_adjustment(part_id: int, delta: int, reason: str = None, user_id: int = None):
+    """
+    Adjusts stock count (+ or -) and logs to stock_adjustments table.
+    Validates that quantity never drops below 0.
+    """
+    from models import Stock_Adjustment
+    part = db.session.get(Spare_Part, part_id)
+    if not part:
+        raise LookupError("Spare part not found")
+
+    new_qty = part.Quantity_In_Stock + delta
+    if new_qty < 0:
+        raise ValueError(f"Stock quantity cannot be negative (current: {part.Quantity_In_Stock}, requested change: {delta})")
+
+    part.Quantity_In_Stock = new_qty
+    adj = Stock_Adjustment(
+        part_id=part.Part_ID,
+        delta=delta,
+        reason=reason,
+        user_id=user_id
+    )
+    db.session.add(adj)
+
+    # Low stock notification if stock decreased
+    if delta < 0 and part.Quantity_In_Stock <= part.Min_Threshold:
+        notify_admins(f"Low Stock Alert: Part '{part.Name}' has only {part.Quantity_In_Stock} units remaining (Threshold: {part.Min_Threshold}).")
+
+    db.session.commit()
+    return part, adj
